@@ -1,0 +1,588 @@
+{
+  "coPilot": [
+    {
+      "type": "products",
+      "id": "17075",
+      "attributes": {
+        "title": "Seeker NY Co-Pilot Membership",
+        "description": "Seeker Co-Pilot Membership. The Seeker tier is where most new Co-Pilots begin; a foundation for learning the rhythm of the program and sharing Othership with your community. Enjoy 2 monthly passes + 1 guest pass - 3 months. 11% Discount Code. For use in New York Only.",
+        "is_discountable": true,
+        "slug": "seeker-ny-co-pilot-membership",
+        "date_created": "2025-10-29T18:34:41.265052Z",
+        "date_updated": "2025-11-05T15:27:03.710391Z",
+        "supported_currencies": [],
+        "options": {
+          "exclude_discounts": {
+            "name": "Exclude Discounts",
+            "required": false
+          },
+          "start_date": {
+            "name": "Start Date",
+            "required": false
+          },
+          "payment_interval_start_type": {
+            "name": "Payment Interval Start Type",
+            "required": false
+          },
+          "billing_type": {
+            "name": "Billing Type",
+            "required": false
+          },
+          "membership_instance_id": {
+            "name": "Membership Instance ID",
+            "required": false
+          }
+        },
+        "is_public": true,
+        "default_inventoriable": false,
+        "is_active": true,
+        "user_has_any_locations": false,
+        "user_has_all_locations": false,
+        "is_live_stream": false,
+        "is_first_timer_only": false,
+        "is_intro_offer": false,
+        "min_price": null,
+        "max_price": null,
+        "children_count": 1,
+        "anonymously_purchasable": false,
+        "vendor": null,
+        "sub_category": null,
+        "locations": []
+      },
+      "relationships": {
+        "product_class": {
+          "data": {
+            "type": "product_classes",
+            "id": "929"
+          }
+        }
+      }
+    },
+    {
+      "type": "products",
+      "id": "17073",
+      "attributes": {
+        "title": "Seeker TO Co-Pilot Membership",
+        "description": "Seeker Co-Pilot Membership. The Seeker tier is where most new Co-Pilots begin; a foundation for learning the rhythm of the program and sharing Othership with your community. 2 monthly passes + 1 guest pass - 3 months. 11% Discount Code. Used for Toronto locations only.",
+        "is_discountable": true,
+        "slug": "seeker-to-co-pilot-membership",
+        "date_created": "2025-10-29T18:32:35.730437Z",
+        "date_updated": "2025-11-05T15:27:28.922582Z",
+        "supported_currencies": [],
+        "options": {
+          "exclude_discounts": {
+            "name": "Exclude Discounts",
+            "required": false
+          },
+          "start_date": {
+            "name": "Start Date",
+            "required": false
+          },
+          "payment_interval_start_type": {
+            "name": "Payment Interval Start Type",
+            "required": false
+          },
+          "billing_type": {
+            "name": "Billing Type",
+            "required": false
+          },
+          "membership_instance_id": {
+            "name": "Membership Instance ID",
+            "required": false
+          }
+        },
+        "is_public": true,
+        "default_inventoriable": false,
+        "is_active": true,
+        "user_has_any_locations": false,
+        "user_has_all_locations": false,
+        "is_live_stream": false,
+        "is_first_timer_only": false,
+        "is_intro_offer": false,
+        "min_price": null,
+        "max_price": null,
+        "children_count": 1,
+        "anonymously_purchasable": false,
+        "vendor": null,
+        "sub_category": null,
+        "locations": []
+      },
+      "relationships": {
+        "product_class": {
+          "data": {
+            "type": "product_classes",
+            "id": "929"
+          }
+        }
+      }
+    },
+    {
+      "type": "products",
+      "id": "17071",
+      "attributes": {
+        "title": "Wayfinder NY Co-Pilot Membership",
+        "description": "Wayfinder Co-Pilot Membership. Wayfinders are our mid-level Co-Pilots — steady, intentional, and helping others find their way into the community. Enjoy 4 monthly passes + 1 Guest Pass - 6 months. 13% off Discount. For use in New York locations.",
+        "is_discountable": true,
+        "slug": "wayfinder-ny-co-pilot-membership",
+        "date_created": "2025-10-29T18:30:35.485187Z",
+        "date_updated": "2025-11-05T15:26:15.276037Z",
+        "supported_currencies": [],
+        "options": {
+          "exclude_discounts": {
+            "name": "Exclude Discounts",
+            "required": false
+          },
+          "start_date": {
+            "name": "Start Date",
+            "required": false
+          },
+          "payment_interval_start_type": {
+            "name": "Payment Interval Start Type",
+            "required": false
+          },
+          "billing_type": {
+            "name": "Billing Type",
+            "required": false
+          },
+          "membership_instance_id": {
+            "name": "Membership Instance ID",
+            "required": false
+          }
+        },
+        "is_public": true,
+        "default_inventoriable": false,
+        "is_active": true,
+        "user_has_any_locations": false,
+        "user_has_all_locations": false,
+        "is_live_stream": false,
+        "is_first_timer_only": false,
+        "is_intro_offer": false,
+        "min_price": null,
+        "max_price": null,
+        "children_count": 1,
+        "anonymously_purchasable": false,
+        "vendor": null,
+        "sub_category": null,
+        "locations": []
+      },
+      "relationships": {
+        "product_class": {
+          "data": {
+            "type": "product_classes",
+            "id": "929"
+          }
+        }
+      }
+    },
+    {
+      "type": "products",
+      "id": "17069",
+      "attributes": {
+        "title": "Wayfinder TO Co-Pilot Membership",
+        "description": "Wayfinder Co-Pilot Membership. Wayfinders are our mid-level Co-Pilots — steady, intentional, and helping others find their way into the community. Enjoy  4 monthly passes + 1 Guest Pass - 6 months. 13% Discount Code. For use at the Toronto locations.",
+        "is_discountable": true,
+        "slug": "wayfinder-to-co-pilot-membership",
+        "date_created": "2025-10-29T18:28:09.803600Z",
+        "date_updated": "2025-11-05T15:26:42.089872Z",
+        "supported_currencies": [],
+        "options": {
+          "exclude_discounts": {
+            "name": "Exclude Discounts",
+            "required": false
+          },
+          "start_date": {
+            "name": "Start Date",
+            "required": false
+          },
+          "payment_interval_start_type": {
+            "name": "Payment Interval Start Type",
+            "required": false
+          },
+          "billing_type": {
+            "name": "Billing Type",
+            "required": false
+          },
+          "membership_instance_id": {
+            "name": "Membership Instance ID",
+            "required": false
+          }
+        },
+        "is_public": true,
+        "default_inventoriable": false,
+        "is_active": true,
+        "user_has_any_locations": false,
+        "user_has_all_locations": false,
+        "is_live_stream": false,
+        "is_first_timer_only": false,
+        "is_intro_offer": false,
+        "min_price": null,
+        "max_price": null,
+        "children_count": 1,
+        "anonymously_purchasable": false,
+        "vendor": null,
+        "sub_category": null,
+        "locations": []
+      },
+      "relationships": {
+        "product_class": {
+          "data": {
+            "type": "product_classes",
+            "id": "929"
+          }
+        }
+      }
+    },
+    {
+      "type": "products",
+      "id": "17067",
+      "attributes": {
+        "title": "Luminary NY Co-Pilot Membership",
+        "description": "Luminary NY Co-Pilot Membership. Luminaries are the guiding lights of the Othership community — those who’ve inspired the most people to begin their journey of transformation through breath, ritual, and connection. Enjoy: 5 passes/2 guest passes. 1 year membership. 15% Discount on your code.",
+        "is_discountable": true,
+        "slug": "luminary-ny-co-pilot-membership",
+        "date_created": "2025-10-29T18:25:43.761558Z",
+        "date_updated": "2025-11-05T15:27:53.610743Z",
+        "supported_currencies": [],
+        "options": {
+          "exclude_discounts": {
+            "name": "Exclude Discounts",
+            "required": false
+          },
+          "start_date": {
+            "name": "Start Date",
+            "required": false
+          },
+          "payment_interval_start_type": {
+            "name": "Payment Interval Start Type",
+            "required": false
+          },
+          "billing_type": {
+            "name": "Billing Type",
+            "required": false
+          },
+          "membership_instance_id": {
+            "name": "Membership Instance ID",
+            "required": false
+          }
+        },
+        "is_public": true,
+        "default_inventoriable": false,
+        "is_active": true,
+        "user_has_any_locations": false,
+        "user_has_all_locations": false,
+        "is_live_stream": false,
+        "is_first_timer_only": false,
+        "is_intro_offer": false,
+        "min_price": null,
+        "max_price": null,
+        "children_count": 1,
+        "anonymously_purchasable": false,
+        "vendor": null,
+        "sub_category": null,
+        "locations": []
+      },
+      "relationships": {
+        "product_class": {
+          "data": {
+            "type": "product_classes",
+            "id": "929"
+          }
+        }
+      }
+    },
+    {
+      "type": "products",
+      "id": "17065",
+      "attributes": {
+        "title": "Luminary TO Co-Pilot Membership",
+        "description": "Luminary TO Co-Pilot Contract. Luminaries are the guiding lights of the Othership community — those who’ve inspired the most people to begin their journey of transformation through breath, ritual, and connection. Enjoy 1 Year membership. 5 passes and 2 guest passes. 15% discount Code.",
+        "is_discountable": true,
+        "slug": "luminary-to-co-pilot-membership",
+        "date_created": "2025-10-29T18:21:49.049224Z",
+        "date_updated": "2025-11-05T15:28:10.618932Z",
+        "supported_currencies": [],
+        "options": {
+          "exclude_discounts": {
+            "name": "Exclude Discounts",
+            "required": false
+          },
+          "start_date": {
+            "name": "Start Date",
+            "required": false
+          },
+          "payment_interval_start_type": {
+            "name": "Payment Interval Start Type",
+            "required": false
+          },
+          "billing_type": {
+            "name": "Billing Type",
+            "required": false
+          },
+          "membership_instance_id": {
+            "name": "Membership Instance ID",
+            "required": false
+          }
+        },
+        "is_public": true,
+        "default_inventoriable": false,
+        "is_active": true,
+        "user_has_any_locations": false,
+        "user_has_all_locations": false,
+        "is_live_stream": false,
+        "is_first_timer_only": false,
+        "is_intro_offer": false,
+        "min_price": null,
+        "max_price": null,
+        "children_count": 1,
+        "anonymously_purchasable": false,
+        "vendor": null,
+        "sub_category": null,
+        "locations": []
+      },
+      "relationships": {
+        "product_class": {
+          "data": {
+            "type": "product_classes",
+            "id": "929"
+          }
+        }
+      }
+    }
+  ],
+  "wayFinder": [
+    {
+      "type": "products",
+      "id": "17071",
+      "attributes": {
+        "title": "Wayfinder NY Co-Pilot Membership",
+        "description": "Wayfinder Co-Pilot Membership. Wayfinders are our mid-level Co-Pilots — steady, intentional, and helping others find their way into the community. Enjoy 4 monthly passes + 1 Guest Pass - 6 months. 13% off Discount. For use in New York locations.",
+        "is_discountable": true,
+        "slug": "wayfinder-ny-co-pilot-membership",
+        "date_created": "2025-10-29T18:30:35.485187Z",
+        "date_updated": "2025-11-05T15:26:15.276037Z",
+        "supported_currencies": [],
+        "options": {
+          "exclude_discounts": {
+            "name": "Exclude Discounts",
+            "required": false
+          },
+          "start_date": {
+            "name": "Start Date",
+            "required": false
+          },
+          "payment_interval_start_type": {
+            "name": "Payment Interval Start Type",
+            "required": false
+          },
+          "billing_type": {
+            "name": "Billing Type",
+            "required": false
+          },
+          "membership_instance_id": {
+            "name": "Membership Instance ID",
+            "required": false
+          }
+        },
+        "is_public": true,
+        "default_inventoriable": false,
+        "is_active": true,
+        "user_has_any_locations": false,
+        "user_has_all_locations": false,
+        "is_live_stream": false,
+        "is_first_timer_only": false,
+        "is_intro_offer": false,
+        "min_price": null,
+        "max_price": null,
+        "children_count": 1,
+        "anonymously_purchasable": false,
+        "vendor": null,
+        "sub_category": null,
+        "locations": []
+      },
+      "relationships": {
+        "product_class": {
+          "data": {
+            "type": "product_classes",
+            "id": "929"
+          }
+        }
+      }
+    },
+    {
+      "type": "products",
+      "id": "17069",
+      "attributes": {
+        "title": "Wayfinder TO Co-Pilot Membership",
+        "description": "Wayfinder Co-Pilot Membership. Wayfinders are our mid-level Co-Pilots — steady, intentional, and helping others find their way into the community. Enjoy  4 monthly passes + 1 Guest Pass - 6 months. 13% Discount Code. For use at the Toronto locations.",
+        "is_discountable": true,
+        "slug": "wayfinder-to-co-pilot-membership",
+        "date_created": "2025-10-29T18:28:09.803600Z",
+        "date_updated": "2025-11-05T15:26:42.089872Z",
+        "supported_currencies": [],
+        "options": {
+          "exclude_discounts": {
+            "name": "Exclude Discounts",
+            "required": false
+          },
+          "start_date": {
+            "name": "Start Date",
+            "required": false
+          },
+          "payment_interval_start_type": {
+            "name": "Payment Interval Start Type",
+            "required": false
+          },
+          "billing_type": {
+            "name": "Billing Type",
+            "required": false
+          },
+          "membership_instance_id": {
+            "name": "Membership Instance ID",
+            "required": false
+          }
+        },
+        "is_public": true,
+        "default_inventoriable": false,
+        "is_active": true,
+        "user_has_any_locations": false,
+        "user_has_all_locations": false,
+        "is_live_stream": false,
+        "is_first_timer_only": false,
+        "is_intro_offer": false,
+        "min_price": null,
+        "max_price": null,
+        "children_count": 1,
+        "anonymously_purchasable": false,
+        "vendor": null,
+        "sub_category": null,
+        "locations": []
+      },
+      "relationships": {
+        "product_class": {
+          "data": {
+            "type": "product_classes",
+            "id": "929"
+          }
+        }
+      }
+    }
+  ],
+  "luminary": [
+    {
+      "type": "products",
+      "id": "17067",
+      "attributes": {
+        "title": "Luminary NY Co-Pilot Membership",
+        "description": "Luminary NY Co-Pilot Membership. Luminaries are the guiding lights of the Othership community — those who’ve inspired the most people to begin their journey of transformation through breath, ritual, and connection. Enjoy: 5 passes/2 guest passes. 1 year membership. 15% Discount on your code.",
+        "is_discountable": true,
+        "slug": "luminary-ny-co-pilot-membership",
+        "date_created": "2025-10-29T18:25:43.761558Z",
+        "date_updated": "2025-11-05T15:27:53.610743Z",
+        "supported_currencies": [],
+        "options": {
+          "exclude_discounts": {
+            "name": "Exclude Discounts",
+            "required": false
+          },
+          "start_date": {
+            "name": "Start Date",
+            "required": false
+          },
+          "payment_interval_start_type": {
+            "name": "Payment Interval Start Type",
+            "required": false
+          },
+          "billing_type": {
+            "name": "Billing Type",
+            "required": false
+          },
+          "membership_instance_id": {
+            "name": "Membership Instance ID",
+            "required": false
+          }
+        },
+        "is_public": true,
+        "default_inventoriable": false,
+        "is_active": true,
+        "user_has_any_locations": false,
+        "user_has_all_locations": false,
+        "is_live_stream": false,
+        "is_first_timer_only": false,
+        "is_intro_offer": false,
+        "min_price": null,
+        "max_price": null,
+        "children_count": 1,
+        "anonymously_purchasable": false,
+        "vendor": null,
+        "sub_category": null,
+        "locations": []
+      },
+      "relationships": {
+        "product_class": {
+          "data": {
+            "type": "product_classes",
+            "id": "929"
+          }
+        }
+      }
+    },
+    {
+      "type": "products",
+      "id": "17065",
+      "attributes": {
+        "title": "Luminary TO Co-Pilot Membership",
+        "description": "Luminary TO Co-Pilot Contract. Luminaries are the guiding lights of the Othership community — those who’ve inspired the most people to begin their journey of transformation through breath, ritual, and connection. Enjoy 1 Year membership. 5 passes and 2 guest passes. 15% discount Code.",
+        "is_discountable": true,
+        "slug": "luminary-to-co-pilot-membership",
+        "date_created": "2025-10-29T18:21:49.049224Z",
+        "date_updated": "2025-11-05T15:28:10.618932Z",
+        "supported_currencies": [],
+        "options": {
+          "exclude_discounts": {
+            "name": "Exclude Discounts",
+            "required": false
+          },
+          "start_date": {
+            "name": "Start Date",
+            "required": false
+          },
+          "payment_interval_start_type": {
+            "name": "Payment Interval Start Type",
+            "required": false
+          },
+          "billing_type": {
+            "name": "Billing Type",
+            "required": false
+          },
+          "membership_instance_id": {
+            "name": "Membership Instance ID",
+            "required": false
+          }
+        },
+        "is_public": true,
+        "default_inventoriable": false,
+        "is_active": true,
+        "user_has_any_locations": false,
+        "user_has_all_locations": false,
+        "is_live_stream": false,
+        "is_first_timer_only": false,
+        "is_intro_offer": false,
+        "min_price": null,
+        "max_price": null,
+        "children_count": 1,
+        "anonymously_purchasable": false,
+        "vendor": null,
+        "sub_category": null,
+        "locations": []
+      },
+      "relationships": {
+        "product_class": {
+          "data": {
+            "type": "product_classes",
+            "id": "929"
+          }
+        }
+      }
+    }
+  ]
+}

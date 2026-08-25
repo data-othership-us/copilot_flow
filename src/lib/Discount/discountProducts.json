@@ -1,0 +1,292 @@
+{
+  "toronto": [
+    {
+      "id": "15215",
+      "title": "Toronto Starter 3 Pack $128",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48717",
+          "name": "Adelaide"
+        },
+        {
+          "id": "48750",
+          "name": "Yorkville"
+        }
+      ]
+    },
+    {
+      "id": "15213",
+      "title": "Intro 2 Week $128",
+      "product_class": {
+        "id": "929",
+        "name": "Membership",
+        "slug": "membership"
+      },
+      "locations": [
+        {
+          "id": "48717",
+          "name": "Adelaide"
+        },
+        {
+          "id": "48750",
+          "name": "Yorkville"
+        }
+      ]
+    },
+    {
+      "id": "14930",
+      "title": "Toronto 50 Pack",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48717",
+          "name": "Adelaide"
+        },
+        {
+          "id": "48750",
+          "name": "Yorkville"
+        }
+      ]
+    },
+    {
+      "id": "14837",
+      "title": "Toronto 25 Pack",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48717",
+          "name": "Adelaide"
+        },
+        {
+          "id": "48750",
+          "name": "Yorkville"
+        }
+      ]
+    },
+    {
+      "id": "14742",
+      "title": "Toronto 10 Pack",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48717",
+          "name": "Adelaide"
+        },
+        {
+          "id": "48750",
+          "name": "Yorkville"
+        }
+      ]
+    },
+    {
+      "id": "14736",
+      "title": "Toronto 5 Pack",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48717",
+          "name": "Adelaide"
+        },
+        {
+          "id": "48750",
+          "name": "Yorkville"
+        }
+      ]
+    },
+    {
+      "id": "14726",
+      "title": "Toronto Single Drop-In",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48717",
+          "name": "Adelaide"
+        },
+        {
+          "id": "48750",
+          "name": "Yorkville"
+        }
+      ]
+    },
+    {
+      "id": "14724",
+      "title": "Toronto Learner 3 Pack $99 (ONLINE OFFER ONLY) ",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48717",
+          "name": "Adelaide"
+        },
+        {
+          "id": "48750",
+          "name": "Yorkville"
+        }
+      ]
+    }
+  ],
+  "nyc": [
+    {
+      "id": "15776",
+      "title": "NY Intro 3 Pack",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48784",
+          "name": "Flatiron"
+        },
+        {
+          "id": "48817",
+          "name": "Williamsburg"
+        }
+      ]
+    },
+    {
+      "id": "15756",
+      "title": "NY 50 Class Pack",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48784",
+          "name": "Flatiron"
+        },
+        {
+          "id": "48817",
+          "name": "Williamsburg"
+        }
+      ]
+    },
+    {
+      "id": "15744",
+      "title": "NY 20 Class Pack",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48784",
+          "name": "Flatiron"
+        },
+        {
+          "id": "48817",
+          "name": "Williamsburg"
+        }
+      ]
+    },
+    {
+      "id": "15736",
+      "title": "NY 10 Class Pack",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48784",
+          "name": "Flatiron"
+        },
+        {
+          "id": "48817",
+          "name": "Williamsburg"
+        }
+      ]
+    },
+    {
+      "id": "15734",
+      "title": "NY Intro 1 Week $64",
+      "product_class": {
+        "id": "929",
+        "name": "Membership",
+        "slug": "membership"
+      },
+      "locations": [
+        {
+          "id": "48784",
+          "name": "Flatiron"
+        },
+        {
+          "id": "48817",
+          "name": "Williamsburg"
+        }
+      ]
+    },
+    {
+      "id": "15726",
+      "title": "NY 5 Class Pack",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48784",
+          "name": "Flatiron"
+        },
+        {
+          "id": "48817",
+          "name": "Williamsburg"
+        }
+      ]
+    },
+    {
+      "id": "15720",
+      "title": "NY Single Credit",
+      "product_class": {
+        "id": "930",
+        "name": "Credits",
+        "slug": "credits"
+      },
+      "locations": [
+        {
+          "id": "48784",
+          "name": "Flatiron"
+        },
+        {
+          "id": "48817",
+          "name": "Williamsburg"
+        }
+      ]
+    }
+  ]
+}
+

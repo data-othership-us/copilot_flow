@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+*.csv
+.DS_Store
+membership_log.json
+membership_summary.txt
+future_reservations.txt
+emails_not_found.txt
+deploy/*.env.yaml

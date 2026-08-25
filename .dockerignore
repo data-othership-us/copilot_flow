@@ -1,0 +1,16 @@
+.node_modules
+npm-debug.log
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+*.md
+membership_log.json
+membership_summary.txt
+deploy/*.env.yaml
+!deploy/*.env.yaml.example
+.DS_Store
+tmp
+/tmp
+**/*.log
