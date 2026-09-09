@@ -1,15 +1,13 @@
 import { config } from "../config.js";
-import { getApplicantByEmail } from "../lib/bq/applicants.js";
+import { getApplicantByEmail, markPromoted, promoteToCopilotDb } from "../lib/bq/applicants.js";
 import { ensureCopilotDbColumns } from "../lib/bq/copilotDb.js";
 import {
   getApplicantPageIdByEmail,
   getCopilotByEmail,
-  listExistingPromoCodes,
   listPendingOnboard,
   markApplicantOnboarded,
   updateCopilotByEmail,
 } from "../lib/bq/copilotOps.js";
-import { createCopilotDiscount } from "../lib/Discount/createDiscount.js";
 import {
   estimatedSeekerEnd,
   formatExpirationDate,
@@ -30,9 +28,14 @@ import {
   holdIfPreviouslyOffboarded,
   isNeverAgain,
   reonboardAllowsOnboard,
+  resolveNeedsReview,
   wasPreviouslyOffboarded,
 } from "../lib/onboard/priorOffboard.js";
-import { basePromoCode, uniquePromoCode } from "../lib/onboard/promoCode.js";
+import { ensureOnboardDiscount } from "../lib/onboard/ensureDiscount.js";
+import {
+  findExistingCopilotPromo,
+  listTakenPromoCodes,
+} from "../lib/onboard/existingPromo.js";
 import {
   titleCaseTier,
 } from "../lib/copilotIdentity.js";
@@ -50,21 +53,97 @@ function membershipEnd(live) {
   );
 }
 
+function recordDiscountSummary(summary, ensured) {
+  if (ensured.created) summary.discountsCreated++;
+  if (ensured.reactivated) summary.discountsReactivated++;
+}
+
+async function provisionPromo({
+  email,
+  row,
+  existingPromo,
+  takenCodes,
+  tier,
+  summary,
+}) {
+  const owned = Boolean(
+    existingPromo?.promoCode ||
+      existingPromo?.discountId ||
+      row.promo_code ||
+      row.discount_id
+  );
+  const via =
+    existingPromo?.source === "discount_codes"
+      ? ` (from MT discount_codes${existingPromo.name ? `: ${existingPromo.name}` : ""})`
+      : existingPromo?.source === "copilot_db"
+        ? " (from copilot_db)"
+        : "";
+  let igHandle = row.ig_handle || row.ig_url || "";
+  if (!String(igHandle).trim()) {
+    try {
+      const applicant = await getApplicantByEmail(email);
+      igHandle = applicant?.ig_handle || "";
+    } catch (error) {
+      console.warn(`   ⚠️  applicant IG lookup failed: ${error.message}`);
+    }
+  }
+  const ensured = await ensureOnboardDiscount({
+    firstName: row.first_name,
+    lastName: row.last_name,
+    email,
+    promoCode: existingPromo?.promoCode || row.promo_code,
+    discountId: existingPromo?.discountId || row.discount_id,
+    tier,
+    region: row.region,
+    owned,
+    takenCodes,
+    igHandle,
+    dryRun: config.dryRun,
+  });
+  if (via && owned) {
+    console.log(`   ℹ️  existing promo${via}`);
+  }
+  recordDiscountSummary(summary, ensured);
+  if (!config.dryRun) {
+    const patch = { promo_code: ensured.promoCode };
+    if (ensured.discountId) patch.discount_id = ensured.discountId;
+    await updateCopilotByEmail(email, patch);
+  }
+  return ensured;
+}
+
 /**
  * Already has this person's promo code and a live Co-Pilot membership.
  * Stamp Onboarded; do not create a new code, membership, or welcome email.
+ * Reactivate their voucher if offboard had expired it.
  */
 async function finishAlreadyProvisioned({
   email,
   row,
   mt,
   userId,
-  promoCode,
+  existingPromo,
+  takenCodes,
   live,
   summary,
+  tier,
 }) {
+  if (!config.dryRun) {
+    await ensureCopilotDbRow({ email, row, mt, userId, tier: row.tier || tier });
+  }
+
+  const ensured = await provisionPromo({
+    email,
+    row,
+    existingPromo,
+    takenCodes,
+    tier,
+    summary,
+  });
+  const promoCode = ensured.promoCode;
+  const discountId = ensured.discountId;
+
   const end = formatExpirationDate(membershipEnd(live));
-  console.log(`   🏷️  promo_code already set (${promoCode})`);
   console.log(
     `   🎫 membership already live (${live.attributes?.membership_name || live.id}` +
       `${end ? `; ends ${end}` : ""})`
@@ -73,22 +152,31 @@ async function finishAlreadyProvisioned({
     "   ✅ Already provisioned — would skip new code / membership / welcome email"
   );
 
+  const existingRow = await getCopilotByEmail(email);
   if (config.dryRun) {
-    console.log("   (DRY_RUN: would set onboarded_at + Notion Onboarded)");
+    console.log(
+      existingRow
+        ? "   (DRY_RUN: would set onboarded_at + Notion Onboarded)"
+        : "   (DRY_RUN: would INSERT copilot_db + set onboarded_at + Notion Onboarded)"
+    );
     summary.alreadyProvisioned++;
     summary.onboarded++;
     return;
   }
 
-  await updateCopilotByEmail(email, {
+  const patch = {
     status: "active",
     user_id: userId || row.user_id || null,
     mt_email: mt.mtEmail || row.mt_email || null,
     mt_profile_link: mt.mtProfileLink || row.mt_profile_link || null,
+    promo_code: promoCode,
     promoted_at: "NOW",
     onboarded_at: "NOW",
     offer_link: row.offer_link || buildOfferLink(promoCode),
-  });
+  };
+  if (discountId) patch.discount_id = String(discountId);
+
+  await updateCopilotByEmail(email, patch);
 
   const notionPageId = await getApplicantPageIdByEmail(email);
   if (notionPageId) {
@@ -100,6 +188,36 @@ async function finishAlreadyProvisioned({
   }
   summary.alreadyProvisioned++;
   summary.onboarded++;
+}
+
+async function ensureCopilotDbRow({ email, row, mt, userId, tier }) {
+  const existing = await getCopilotByEmail(email);
+  if (existing) return existing;
+
+  const applicant = await getApplicantByEmail(email);
+  const inserted = await promoteToCopilotDb({
+    email,
+    first_name: row.first_name || applicant?.first_name,
+    last_name: row.last_name || applicant?.last_name,
+    region: row.region || applicant?.region,
+    tier: tier || row.tier || applicant?.tier || "Seeker",
+    mt_user_id: userId || applicant?.mt_user_id,
+    mt_email: mt.mtEmail || row.mt_email || applicant?.mt_email,
+    mt_profile_link:
+      mt.mtProfileLink || row.mt_profile_link || applicant?.mt_profile_link,
+    ig_handle: applicant?.ig_handle,
+    ig_url: applicant?.ig_url,
+    ig_followers: applicant?.ig_followers,
+    tiktok_handle: applicant?.tiktok_handle,
+    tiktok_followers: applicant?.tiktok_followers,
+    other_channels: applicant?.other_channels,
+  });
+  if (inserted === "inserted") {
+    console.log("   ✅ Inserted into copilot_db");
+  }
+  const promotePageId = await getApplicantPageIdByEmail(email);
+  if (promotePageId) await markPromoted(promotePageId);
+  return getCopilotByEmail(email);
 }
 
 async function onboardOne(row, takenCodes, summary) {
@@ -122,6 +240,55 @@ async function onboardOne(row, takenCodes, summary) {
     return;
   }
 
+  let notionApp = null;
+  try {
+    notionApp = await findApplicationForReonboard(email);
+  } catch (error) {
+    console.warn(`   ⚠️  Notion re-onboard lookup failed: ${error.message}`);
+  }
+  const needsReviewAction = await resolveNeedsReview(notionApp, row, {
+    dryRun: config.dryRun,
+    email,
+  });
+  if (needsReviewAction === "onboarded") {
+    summary.alreadyProvisioned++;
+    summary.onboarded++;
+    return;
+  }
+  if (needsReviewAction === "evaluated") {
+    summary.reonboardHold++;
+    return;
+  }
+
+  const tier = titleCaseTier(row.tier || "Seeker");
+  const userId = mt.mtUserId || row.user_id;
+  const live = await findLiveCopilotMembership(userId);
+  const existingPromo = await findExistingCopilotPromo({
+    firstName: row.first_name,
+    lastName: row.last_name,
+    email,
+    promoCode: row.promo_code,
+    discountId: row.discount_id,
+    tier,
+  });
+  let promoCode = existingPromo?.promoCode || "";
+  let offerLink = String(row.offer_link || "").trim();
+
+  if (promoCode && live) {
+    await finishAlreadyProvisioned({
+      email,
+      row,
+      mt,
+      userId,
+      existingPromo,
+      takenCodes,
+      live,
+      summary,
+      tier,
+    });
+    return;
+  }
+
   const blockers = getOnboardingBlockers(mt);
   if (blockers.length) {
     console.log(`   🚧 Still blocked (${blockers.join(", ")}) — skip`);
@@ -130,12 +297,6 @@ async function onboardOne(row, takenCodes, summary) {
   }
 
   if (wasPreviouslyOffboarded(row)) {
-    let notionApp = null;
-    try {
-      notionApp = await findApplicationForReonboard(email);
-    } catch (error) {
-      console.warn(`   ⚠️  Notion re-onboard lookup failed: ${error.message}`);
-    }
     if (!reonboardAllowsOnboard(notionApp?.reOnboard)) {
       const hold = await holdIfPreviouslyOffboarded(
         notionApp || { notionPageId: null, reOnboard: "" },
@@ -143,68 +304,26 @@ async function onboardOne(row, takenCodes, summary) {
         { dryRun: config.dryRun }
       );
       if (hold.held) {
-        console.log("   ⏸️  Previously offboarded — skip onboard until ops Proceed");
+        console.log("   ⏸️  Previously offboarded — skip onboard");
         summary.reonboardHold++;
         return;
       }
     }
   }
 
-  const tier = titleCaseTier(row.tier || "Seeker");
-  const userId = mt.mtUserId || row.user_id;
-  let promoCode = String(row.promo_code || "").trim().toUpperCase();
-  let discountId = row.discount_id ? String(row.discount_id) : "";
-  let offerLink = String(row.offer_link || "").trim();
-
-  const live = await findLiveCopilotMembership(userId);
-  if (promoCode && live) {
-    await finishAlreadyProvisioned({
-      email,
-      row,
-      mt,
-      userId,
-      promoCode,
-      live,
-      summary,
-    });
-    return;
+  if (!config.dryRun) {
+    await ensureCopilotDbRow({ email, row, mt, userId, tier });
   }
 
-  if (!promoCode) {
-    promoCode = uniquePromoCode(
-      basePromoCode(row.first_name, row.last_name, email),
-      takenCodes
-    );
-    takenCodes.add(promoCode);
-    console.log(`   🏷️  promo_code=${promoCode} (would create)`);
-    if (!config.dryRun) {
-      await updateCopilotByEmail(email, { promo_code: promoCode });
-    }
-  } else {
-    console.log(`   🏷️  promo_code already set (${promoCode})`);
-  }
-
-  if (!discountId) {
-    console.log(
-      `   🎟️  discount: would create MT ${tier} discount for ${promoCode} (${row.region || "region?"})`
-    );
-    if (!config.dryRun) {
-      discountId = String(
-        await createCopilotDiscount(
-          row.first_name || "",
-          row.last_name || "",
-          promoCode,
-          tier,
-          row.region
-        )
-      );
-      await updateCopilotByEmail(email, { discount_id: discountId });
-      console.log(`   ✅ discount_id=${discountId}`);
-    }
-    summary.discountsCreated++;
-  } else {
-    console.log(`   ⏭️  discount already exists (${discountId})`);
-  }
+  const ensured = await provisionPromo({
+    email,
+    row,
+    existingPromo,
+    takenCodes,
+    tier,
+    summary,
+  });
+  promoCode = ensured.promoCode;
 
   const desiredLink = buildOfferLink(promoCode);
   if (desiredLink && offerLink !== desiredLink) {
@@ -277,6 +396,7 @@ async function onboardOne(row, takenCodes, summary) {
     await sendLifecycleEmail({
       kind: "acceptance",
       email,
+      mtEmail: mt.mtEmail || row.mt_email || null,
       firstName: row.first_name,
       lastName: row.last_name,
       tier,
@@ -285,6 +405,7 @@ async function onboardOne(row, takenCodes, summary) {
       promoCode,
       expirationDate,
       dryRun: config.dryRun,
+      requireSend: !config.dryRun,
     });
     if (!config.dryRun) {
       patchIdentity.acceptance_emailed_at = "NOW";
@@ -344,6 +465,7 @@ async function rowsFromEmails(emails) {
         promo_code: null,
         discount_id: null,
         offer_link: null,
+        ig_handle: app.ig_handle,
         acceptance_emailed_at: null,
       });
       continue;
@@ -371,6 +493,7 @@ export async function onboardCopilots() {
     onboarded: 0,
     blocked: 0,
     discountsCreated: 0,
+    discountsReactivated: 0,
     offerLinksWritten: 0,
     membershipsAssigned: 0,
     membershipSkipped: 0,
@@ -410,7 +533,7 @@ export async function onboardCopilots() {
   }
   summary.scanned = rows.length;
 
-  const takenCodes = await listExistingPromoCodes();
+  const takenCodes = await listTakenPromoCodes();
 
   for (const row of rows) {
     try {
@@ -431,11 +554,14 @@ export async function onboardCopilots() {
   console.log(`   Onboarded: ${summary.onboarded}`);
   console.log(`   Already provisioned (code + live membership): ${summary.alreadyProvisioned}`);
   console.log(`   Blocked (no MT/CC): ${summary.blocked}`);
-  console.log(`   Previously offboarded hold: ${summary.reonboardHold}`);
+  console.log(
+    `   Previously offboarded / Needs review → Evaluated: ${summary.reonboardHold}`
+  );
   if (summary.neverAgain) {
     console.log(`   Never again — skipped: ${summary.neverAgain}`);
   }
   console.log(`   Discounts created: ${summary.discountsCreated}`);
+  console.log(`   Discounts reactivated: ${summary.discountsReactivated}`);
   console.log(`   Offer links written: ${summary.offerLinksWritten}`);
   console.log(`   Memberships assigned: ${summary.membershipsAssigned}`);
   console.log(`   Membership skipped: ${summary.membershipSkipped}`);

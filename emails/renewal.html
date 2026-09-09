@@ -1,8 +1,24 @@
-<p><em>[PLACEHOLDER — swap this template when copy is ready]</em></p>
-<p>Hi {{firstName}},</p>
-<p>Your Othership Co-Pilot membership ({{tier}}) has been renewed. Your new term runs through {{expirationDate}}.</p>
-<p>Your special offer link is still <a href="{{offerLink}}">{{offerLink}}</a> (code {{promoCode}}).</p>
-<p>So glad you're staying in orbit,</p>
+<p>Hey {{firstName}},</p>
+<p>Your {{tier}} membership has been renewed for another {{termMonths}} months. Glad to have you continuing with us.</p>
+<p><strong>This cycle</strong></p>
+<ul>
+  <li>Points earned: {{cyclePoints}}</li>
+  <li>Social requirement met: {{socialRequirementMet}}</li>
+</ul>
+<p><strong>Your {{tier}} term</strong></p>
+<ul>
+  <li>New expiration: {{expirationDate}}</li>
+  <li>Your {{hubHtml}}</li>
+</ul>
+<p><strong>To share with your community</strong></p>
+<ul>
+  <li><strong>Your discount code:</strong> {{promoCode}}</li>
+  <li><strong>Your NEW 2-for-1 link:</strong> <a href="{{offerLink}}">{{offerLink}}</a> — claims count toward your cycle</li>
+  <li><strong>Breathwork app:</strong> {{breathworkCommunityLink}} — 1 month free for them. This isn't part of your cycle score.</li>
+</ul>
+<p>To stay in {{tier}}, we look for {{stayPoints}} points per {{termMonths}}-month cycle, plus your monthly social requirement.</p>
+<p><strong>The monthly social ask:</strong> one of the following per month — 1 feed post or 4 stories. Tag @othership + #othershipcopilots and we'll find it. Include your code and 2-for-1 link.</p>
+<p>Thank you again for your continued, thoughtful support of our community.</p>
 <div class="email-signature">
 {{signatureHtml}}
 </div>

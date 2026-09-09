@@ -71,6 +71,36 @@ function pickBestCopilotCandidate(candidates) {
 }
 
 /**
+ * Resolve MT user by email. First list hit, or null.
+ * @returns {Promise<object|null>}
+ */
+export async function findMtUserByEmail(baseUrl, bearerToken, email) {
+  const normalized = String(email || "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return null;
+
+  try {
+    const response = await axios.get(`${baseUrl}/users`, {
+      headers: {
+        Authorization: `Bearer ${bearerToken}`,
+        ...JSON_API_HEADERS,
+      },
+      params: { email: normalized },
+    });
+    const users = normalizeUserList(response.data?.data);
+    return users[0] || null;
+  } catch (error) {
+    if (error.response?.status === 404) return null;
+    console.error(
+      `❌ Error finding MT user by email ${normalized}:`,
+      error.message
+    );
+    return null;
+  }
+}
+
+/**
  * Resolve MT user by first/last name for Co-Pilots (NOT employees).
  * When multiple users match the name, only keep candidates that have a
  * Co-Pilot membership instance — never just take the first list hit.

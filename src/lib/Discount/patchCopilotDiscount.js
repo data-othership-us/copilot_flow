@@ -11,6 +11,10 @@ import {
   getTorontoProductsForAPI,
 } from "./discountProductHelpers.js";
 import { isNycRegion } from "../copilotIdentity.js";
+import {
+  findExistingCopilotPromo,
+  lookupDiscountIdByPromoCode,
+} from "../onboard/existingPromo.js";
 
 function productsForRegion(region) {
   return isNycRegion(region)
@@ -73,4 +77,198 @@ export async function patchCopilotDiscount({
     { headers: API_HEADERS }
   );
   return response.data;
+}
+
+async function resolveDiscountId({
+  discountId,
+  promoCode,
+  firstName,
+  lastName,
+  email,
+  tier,
+}) {
+  const fromRow = String(discountId || "").trim();
+  if (fromRow) return fromRow;
+  try {
+    const byCode = await lookupDiscountIdByPromoCode(promoCode);
+    if (byCode) return byCode;
+  } catch (error) {
+    console.warn(`   ⚠️  discount_codes lookup failed: ${error.message}`);
+  }
+  try {
+    const existing = await findExistingCopilotPromo({
+      firstName,
+      lastName,
+      email,
+      promoCode,
+      discountId,
+      tier,
+    });
+    return String(existing?.discountId || "").trim();
+  } catch (error) {
+    console.warn(`   ⚠️  existing promo lookup failed: ${error.message}`);
+    return "";
+  }
+}
+
+const DISCOUNT_PATCH_OMIT = new Set([
+  "user_has_all_locations",
+  "user_has_any_locations",
+]);
+
+function writableDiscountAttributes(attributes) {
+  const out = {};
+  for (const [key, value] of Object.entries(attributes || {})) {
+    if (DISCOUNT_PATCH_OMIT.has(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function voucherIsLive(attributes) {
+  if (attributes?.is_active === false) return false;
+  const end = attributes?.end_datetime;
+  if (end && !Number.isNaN(new Date(end).getTime()) && new Date(end).getTime() <= Date.now()) {
+    return false;
+  }
+  return true;
+}
+
+function discountPatchError(discountId, error, action = "patch") {
+  const detail = error?.response?.data ?? error.message;
+  const wrapped = new Error(
+    `${action} discount ${discountId} failed: ${JSON.stringify(detail)}`
+  );
+  wrapped.status = error?.response?.status;
+  return wrapped;
+}
+
+/**
+ * Turn off a Co-Pilot voucher in Mariana Tek.
+ * `is_active` is derived from the voucher window, so we expire it
+ * (`end_datetime` = now). Promo code / offer_link stay on copilot_db.
+ */
+export async function deactivateCopilotDiscount({
+  discountId,
+  promoCode,
+  firstName,
+  lastName,
+  email,
+  tier,
+}) {
+  const id = await resolveDiscountId({
+    discountId,
+    promoCode,
+    firstName,
+    lastName,
+    email,
+    tier,
+  });
+  if (!id) {
+    return { skipped: "no_discount_id" };
+  }
+
+  let current;
+  try {
+    const response = await axios.get(
+      `${MT_API_BASE_URL}/discounts/${id}`,
+      { headers: API_HEADERS }
+    );
+    current = response.data?.data?.attributes || {};
+  } catch (error) {
+    throw discountPatchError(id, error, "deactivate");
+  }
+
+  if (current.is_active === false) {
+    return { discountId: id, skipped: "already_inactive" };
+  }
+
+  const attributes = writableDiscountAttributes(current);
+  attributes.is_active = false;
+  attributes.end_datetime = new Date().toISOString();
+
+  try {
+    await axios.patch(
+      `${MT_API_BASE_URL}/discounts/${id}`,
+      {
+        data: {
+          id: String(id),
+          type: "discounts",
+          attributes,
+        },
+      },
+      { headers: API_HEADERS }
+    );
+  } catch (error) {
+    throw discountPatchError(id, error, "deactivate");
+  }
+
+  return { discountId: id };
+}
+
+/**
+ * Reopen an expired / inactive Co-Pilot voucher (returning copilot).
+ * Clears `end_datetime` and sets `is_active` so the existing promo works again.
+ */
+export async function activateCopilotDiscount({
+  discountId,
+  promoCode,
+  firstName,
+  lastName,
+  email,
+  tier,
+  dryRun = false,
+}) {
+  const id = await resolveDiscountId({
+    discountId,
+    promoCode,
+    firstName,
+    lastName,
+    email,
+    tier,
+  });
+  if (!id) {
+    return { skipped: "no_discount_id" };
+  }
+
+  let current;
+  try {
+    const response = await axios.get(
+      `${MT_API_BASE_URL}/discounts/${id}`,
+      { headers: API_HEADERS }
+    );
+    current = response.data?.data?.attributes || {};
+  } catch (error) {
+    throw discountPatchError(id, error, "activate");
+  }
+
+  if (voucherIsLive(current)) {
+    return { discountId: id, skipped: "already_active" };
+  }
+
+  if (dryRun) {
+    return { discountId: id, dryRun: true };
+  }
+
+  const attributes = writableDiscountAttributes(current);
+  attributes.is_active = true;
+  attributes.end_datetime = null;
+
+  try {
+    await axios.patch(
+      `${MT_API_BASE_URL}/discounts/${id}`,
+      {
+        data: {
+          id: String(id),
+          type: "discounts",
+          attributes,
+        },
+      },
+      { headers: API_HEADERS }
+    );
+  } catch (error) {
+    throw discountPatchError(id, error, "activate");
+  }
+
+  return { discountId: id };
 }

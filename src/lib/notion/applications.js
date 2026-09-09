@@ -25,6 +25,7 @@ import {
   getQualificationIcon,
   splitName,
   composeDisplayName,
+  normalizePersonName,
 } from "./parseProps.js";
 import { splitIgIdentity } from "../instagram.js";
 
@@ -121,8 +122,12 @@ export function parseApplicationPage(page) {
   const firstFromProp = p.firstName ? getRichText(props, p.firstName) : "";
   const lastFromProp = p.lastName ? getRichText(props, p.lastName) : "";
   const split = splitName(fullNameFromTitle);
-  const firstName = firstFromProp || split.firstName;
-  const lastName = lastFromProp || split.lastName;
+  const normalized = normalizePersonName(
+    firstFromProp || split.firstName,
+    lastFromProp || split.lastName
+  );
+  const firstName = normalized.firstName;
+  const lastName = normalized.lastName;
   const fullName =
     composeDisplayName(firstName, lastName) || fullNameFromTitle;
 
@@ -513,8 +518,12 @@ export async function markCreditApplied(pageId, { mt } = {}) {
   await notion.pages.update({ page_id: pageId, properties });
 }
 
+/** Page icon after an onboarding nudge email is sent. */
+const NUDGE_SENT_ICON = "📤";
+
 /**
  * Mark Accepted applicant as needing an onboarding nudge (MT/CC blockers).
+ * When `nudgedAt` is set (email actually sent), the page icon becomes 📤.
  */
 export async function writeOnboardingNudgeToNotion(pageId, { reason, mt, nudgedAt }) {
   const p = config.notion.props;
@@ -532,10 +541,15 @@ export async function writeOnboardingNudgeToNotion(pageId, { reason, mt, nudgedA
 
   assignMtWriteback(properties, mt);
 
-  if (!Object.keys(properties).length) return;
+  const update = { page_id: pageId, properties };
+  if (nudgedAt) {
+    update.icon = { type: "emoji", emoji: NUDGE_SENT_ICON };
+  }
+
+  if (!Object.keys(properties).length && !update.icon) return;
 
   const notion = getNotionClient();
-  await notion.pages.update({ page_id: pageId, properties });
+  await notion.pages.update(update);
 }
 
 /**

@@ -132,25 +132,6 @@
           "name": "Yorkville"
         }
       ]
-    },
-    {
-      "id": "14724",
-      "title": "Toronto Learner 3 Pack $99 (ONLINE OFFER ONLY) ",
-      "product_class": {
-        "id": "930",
-        "name": "Credits",
-        "slug": "credits"
-      },
-      "locations": [
-        {
-          "id": "48717",
-          "name": "Adelaide"
-        },
-        {
-          "id": "48750",
-          "name": "Yorkville"
-        }
-      ]
     }
   ],
   "nyc": [
@@ -232,7 +213,7 @@
     },
     {
       "id": "15734",
-      "title": "NY Intro 1 Week $64",
+      "title": "NY Intro 2 Week $135",
       "product_class": {
         "id": "929",
         "name": "Membership",

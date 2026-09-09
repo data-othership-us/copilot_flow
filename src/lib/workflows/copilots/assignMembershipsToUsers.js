@@ -8,6 +8,7 @@ import {
 import {
   getCartTotal,
   prepareCartForMembership,
+  restoreParkedCartItems,
 } from "../../mt/cartHelpers.js";
 import { mtPost } from "../../mt/marianatekClient.js";
 
@@ -137,7 +138,7 @@ async function assignSeekerMembership(userId, region, partnerId, paymentMethodId
     throw new Error(`No Seeker membership product configured for region ${region}`);
   }
 
-  const { cartId, created, membershipAdded } = await prepareCartForMembership({
+  const { cartId, created, membershipAdded, parked } = await prepareCartForMembership({
     userId,
     partnerId,
     membershipProductId: childProductMembershipId,
@@ -146,28 +147,52 @@ async function assignSeekerMembership(userId, region, partnerId, paymentMethodId
 
   const amount = await getCartTotal(cartId);
 
-  const checkoutData = await mtPost("/checkouts", {
-    data: {
-      type: "checkouts",
-      attributes: {
-        payments: [
-          {
-            amount,
-            type: "bankcard",
-            id: String(paymentMethodId),
+  let checkoutData;
+  try {
+    checkoutData = await mtPost("/checkouts", {
+      data: {
+        type: "checkouts",
+        attributes: {
+          payments: [
+            {
+              amount,
+              type: "bankcard",
+              id: String(paymentMethodId),
+            },
+          ],
+          status: null,
+        },
+        relationships: {
+          cart: { data: { type: "carts", id: String(cartId) } },
+          for_reservation: { data: null },
+          originating_partner: {
+            data: { type: "partners", id: String(partnerId) },
           },
-        ],
-        status: null,
-      },
-      relationships: {
-        cart: { data: { type: "carts", id: String(cartId) } },
-        for_reservation: { data: null },
-        originating_partner: {
-          data: { type: "partners", id: String(partnerId) },
         },
       },
-    },
-  });
+    });
+  } catch (error) {
+    if (parked?.length) {
+      try {
+        await restoreParkedCartItems({ userId, partnerId, parked });
+      } catch (restoreError) {
+        console.warn(
+          `   ⚠️  Failed to restore parked cart items after membership error: ${restoreError.message}`
+        );
+      }
+    }
+    throw error;
+  }
+
+  if (parked?.length) {
+    try {
+      await restoreParkedCartItems({ userId, partnerId, parked });
+    } catch (error) {
+      console.warn(
+        `   ⚠️  Membership assigned but failed to restore parked cart items: ${error.message}`
+      );
+    }
+  }
 
   return {
     cartId: String(cartId),

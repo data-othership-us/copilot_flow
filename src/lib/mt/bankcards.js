@@ -23,8 +23,44 @@ export async function getUserBankcards(userId) {
   return Array.isArray(data) ? data : data ? [data] : [];
 }
 
+export const NO_PAYMENT_METHOD = "NO_PAYMENT_METHOD";
+
 function isValidBankcard(card) {
   return card?.attributes?.is_expired !== true;
+}
+
+export function paymentMethodError(message = "no_cc_on_file") {
+  const error = new Error(message);
+  error.code = NO_PAYMENT_METHOD;
+  return error;
+}
+
+/**
+ * True when membership checkout failed because no card is on file
+ * or the stored card is expired / invalid.
+ */
+export function isPaymentMethodError(error) {
+  if (!error) return false;
+  if (error.code === NO_PAYMENT_METHOD) return true;
+  const text = `${error.message || ""} ${JSON.stringify(error.meta ?? "")}`.toLowerCase();
+  if (text.includes("no_cc_on_file")) return true;
+  if (/no (valid )?(payment method|bankcard|card on file)/.test(text)) return true;
+  if (/\b(expired card|card expired|expired payment|payment expired)\b/.test(text)) {
+    return true;
+  }
+  if (/(payment method|bankcard).{0,60}(expired|invalid|missing)/.test(text)) {
+    return true;
+  }
+  if (/(expired|invalid|missing).{0,60}(payment method|bankcard)/.test(text)) {
+    return true;
+  }
+  return text.includes("is_expired");
+}
+
+/** Throws if the user has no non-expired bankcard. */
+export async function assertValidPaymentMethod(userId) {
+  const hasCc = await hasValidBankcardOnFile(userId);
+  if (!hasCc) throw paymentMethodError("no_cc_on_file");
 }
 
 /**

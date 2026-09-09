@@ -1,5 +1,5 @@
 import { config } from "../../config.js";
-import { updateCopilotByEmail } from "../bq/copilotOps.js";
+import { markApplicantOnboarded, updateCopilotByEmail } from "../bq/copilotOps.js";
 import { syncApplicantStatusFromNotion } from "../bq/applicants.js";
 import {
   addApplicationComment,
@@ -40,6 +40,14 @@ export function wasPreviouslyOffboarded(copilot) {
     return true;
   }
   return status === "inactive";
+}
+
+export function isCopilotDbActive(copilot) {
+  return (
+    String(copilot?.status || "")
+      .trim()
+      .toLowerCase() === "active"
+  );
 }
 
 /** @returns {'' | 'proceed' | 'decline' | 'needs_review'} */
@@ -150,9 +158,149 @@ export async function refuseNeverAgainApplication(
   return true;
 }
 
+function needsReviewReturnComment() {
+  const prop = config.notion.props.reonboard || "Re-onboard";
+  const proceed = config.notion.reonboard.proceed;
+  const needsReview = config.notion.reonboard.needsReview;
+  return (
+    `Re-onboard is ${needsReview}, so this card was moved back to Evaluated ` +
+    `and will not be auto-onboarded. Set ${prop} to ${proceed} and Accept again ` +
+    `when they should be provisioned.`
+  );
+}
+
+function needsReviewActiveOnboardedComment() {
+  const needsReview = config.notion.reonboard.needsReview;
+  return (
+    `Already active in copilot_db, so this card was moved to Onboarded. ` +
+    `Re-onboard is ${needsReview} — no new membership or welcome email was created.`
+  );
+}
+
+/**
+ * Needs review + inactive (or no active roster row): send the card back to
+ * Evaluated so ops can decide without the onboard job picking them up.
+ */
+export async function returnNeedsReviewToEvaluated(
+  app,
+  { dryRun, comment = true } = {}
+) {
+  if (!app?.notionPageId) return false;
+  const evaluated = config.notion.status.evaluated;
+  const current = String(app.status || "").trim();
+  if (current && current.toLowerCase() === evaluated.toLowerCase()) {
+    console.log(`   ↩️  Re-onboard=Needs review — already ${evaluated}`);
+    return true;
+  }
+  console.log(`   ↩️  Re-onboard=Needs review — moving Notion → ${evaluated}`);
+  if (dryRun) {
+    console.log(`   (DRY_RUN: would set Status=${evaluated} and add a page comment)`);
+    return true;
+  }
+  try {
+    await setApplicationStatus(app.notionPageId, evaluated);
+  } catch (error) {
+    console.warn(`   ⚠️  Status → ${evaluated} failed: ${error.message}`);
+  }
+  try {
+    await syncApplicantStatusFromNotion({
+      notionPageId: app.notionPageId,
+      notionStatus: evaluated,
+      clearAdvanced: true,
+    });
+  } catch (error) {
+    console.warn(`   ⚠️  BQ status sync failed: ${error.message}`);
+  }
+  if (comment) {
+    try {
+      await addApplicationComment(app.notionPageId, needsReviewReturnComment());
+    } catch (error) {
+      console.warn(`   ⚠️  Page comment failed: ${error.message}`);
+    }
+  }
+  return true;
+}
+
+/**
+ * Needs review + already active on the roster: they are in the program.
+ * Stamp Onboarded; do not provision a new membership or send welcome email.
+ */
+export async function stampOnboardedForActiveNeedsReview(
+  app,
+  copilot,
+  { dryRun, email } = {}
+) {
+  const onboarded = config.notion.status.onboarded;
+  const current = String(app?.status || "").trim();
+  const alreadyOnboarded =
+    Boolean(current) && current.toLowerCase() === onboarded.toLowerCase();
+  console.log(
+    alreadyOnboarded
+      ? `   ✅ Re-onboard=Needs review but copilot_db is active — already ${onboarded}`
+      : "   ✅ Re-onboard=Needs review but copilot_db is active — Notion → Onboarded"
+  );
+  if (dryRun) {
+    console.log(
+      "   (DRY_RUN: would set onboarded_at + Notion Onboarded; no new membership/email)"
+    );
+    return true;
+  }
+
+  const targetEmail = String(email || copilot?.contact_email || "").trim();
+  if (targetEmail && !copilot?.onboarded_at) {
+    await updateCopilotByEmail(targetEmail, { onboarded_at: "NOW" });
+  }
+
+  if (app?.notionPageId) {
+    if (!alreadyOnboarded) {
+      try {
+        await setApplicationStatus(app.notionPageId, onboarded);
+      } catch (error) {
+        console.warn(`   ⚠️  Status → ${onboarded} failed: ${error.message}`);
+      }
+    }
+    try {
+      await markApplicantOnboarded(app.notionPageId);
+    } catch (error) {
+      console.warn(`   ⚠️  BQ onboarded stamp failed: ${error.message}`);
+    }
+    if (!alreadyOnboarded) {
+      try {
+        await addApplicationComment(
+          app.notionPageId,
+          needsReviewActiveOnboardedComment()
+        );
+      } catch (error) {
+        console.warn(`   ⚠️  Page comment failed: ${error.message}`);
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * Re-onboard = Needs review:
+ * - active in copilot_db → Notion Onboarded (already in the program)
+ * - otherwise → Evaluated (ops decides before provisioning)
+ *
+ * @returns {Promise<null | "onboarded" | "evaluated">}
+ */
+export async function resolveNeedsReview(app, copilot, { dryRun, email } = {}) {
+  if (normalizeReonboardDecision(app?.reOnboard) !== "needs_review") {
+    return null;
+  }
+  if (isCopilotDbActive(copilot)) {
+    await stampOnboardedForActiveNeedsReview(app, copilot, { dryRun, email });
+    return "onboarded";
+  }
+  await returnNeedsReviewToEvaluated(app, { dryRun });
+  return "evaluated";
+}
+
 /**
  * If this Accepted applicant was offboarded before, block auto-onboard until
  * ops sets Re-onboard = Proceed. Comments once and stamps Needs review.
+ * Inactive Needs review cards are moved back to Evaluated (not left on Accepted).
  * "never again" always refuses, including when Re-onboard is Proceed.
  *
  * @returns {Promise<{ held: boolean, reason: string }>}
@@ -177,16 +325,15 @@ export async function holdIfPreviouslyOffboarded(app, copilot, { dryRun } = {}) 
 
   const needsReview = config.notion.reonboard.needsReview;
   if (decision === "needs_review") {
-    console.log(
-      `   ⏸️  Previously offboarded — waiting on ops (${config.notion.props.reonboard}=${needsReview})`
-    );
+    await returnNeedsReviewToEvaluated(app, { dryRun });
     return { held: true, reason: "needs_review" };
   }
 
   console.log("   ⏸️  Previously offboarded — holding auto-onboard for ops");
   if (dryRun) {
     console.log(
-      `   (DRY_RUN: would comment + set ${config.notion.props.reonboard}=${needsReview})`
+      `   (DRY_RUN: would set ${config.notion.props.reonboard}=${needsReview}` +
+        ` and move Notion → ${config.notion.status.evaluated})`
     );
     return { held: true, reason: "flag" };
   }
@@ -201,14 +348,19 @@ export async function holdIfPreviouslyOffboarded(app, copilot, { dryRun } = {}) 
   } catch (error) {
     console.warn(`   ⚠️  Page comment failed: ${error.message}`);
   }
+  await returnNeedsReviewToEvaluated(
+    { ...app, reOnboard: needsReview, status: app?.status },
+    { dryRun: false, comment: false }
+  );
   return { held: true, reason: "flag" };
 }
 
 /**
  * After ops sets Proceed: reopen the copilot_db row so the onboard job
- * can assign a new term. Keeps promo / discount / offer_link, and leaves
- * the offboard decision in place so sheet sync cannot overwrite status
- * back to inactive. No-op when never_again is set.
+ * can assign a new term. Keeps promo / discount / offer_link (onboard
+ * reactivates the expired voucher). Leaves the offboard decision in
+ * place so sheet sync cannot overwrite status back to inactive. No-op
+ * when never_again is set.
  */
 export async function prepareCopilotForReonboard(email, copilot, { dryRun } = {}) {
   if (!email || !wasPreviouslyOffboarded(copilot)) return false;

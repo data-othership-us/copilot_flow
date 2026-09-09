@@ -2,13 +2,18 @@ import { config } from "../config.js";
 import {
   applySheetUnionViews,
   ensureCopilotDbColumns,
+  inactivateMissingFromActiveTabs,
+  listMissingFromActiveTabs,
   mergeSheetIntoCopilotDb,
   previewSheetSync,
 } from "../lib/bq/copilotDb.js";
+import { fillMissingMtAccounts } from "../lib/mt/fillMissingMtAccounts.js";
 
 /**
  * Daily Cloud Run job (8:45am ET) or on-demand: Google Sheet external tables → copilot_db.
  * Sheet-owned columns only; MT/discount/system fields are never overwritten.
+ * After MERGE, marks copilot_db emails missing from every active tab as
+ * inactive, then fills missing user_id / mt_email from Mariana Tek.
  */
 export async function syncCopilotDb({ applyViews = true } = {}) {
   console.log("🚀 sync-copilot-db");
@@ -37,7 +42,7 @@ export async function syncCopilotDb({ applyViews = true } = {}) {
   try {
     preview = await previewSheetSync();
     console.log(
-      `   Sheet rows: ${preview.sheet_rows} | would insert: ${preview.would_insert} | would update: ${preview.would_update}`
+      `   Sheet rows: ${preview.sheet_rows} | would insert: ${preview.would_insert} | would update: ${preview.would_update} | would inactivate (not on an active tab): ${Number(preview.would_inactivate ?? 0)}`
     );
   } catch (error) {
     console.error(
@@ -50,13 +55,35 @@ export async function syncCopilotDb({ applyViews = true } = {}) {
     throw error;
   }
 
+  const wouldInactivate = Number(preview.would_inactivate ?? 0);
+
   if (config.dryRun) {
-    console.log("\n   (DRY_RUN: skipping MERGE)");
-    return { dryRun: true, preview };
+    console.log("\n   (DRY_RUN: skipping MERGE + inactivate)");
+    if (wouldInactivate > 0) {
+      const sample = await listMissingFromActiveTabs({ limit: 15 });
+      for (const r of sample) {
+        console.log(
+          `   · ${r.contact_email}  ${r.region || "?"}/${r.tier || "?"}`
+        );
+      }
+      if (wouldInactivate > sample.length) {
+        console.log(`   · … +${wouldInactivate - sample.length} more`);
+      }
+    }
+    const mtAccounts = await fillMissingMtAccounts({ dryRun: true });
+    return { dryRun: true, preview, mtAccounts };
   }
 
   console.log("\n—— MERGE sheet into copilot_db ——");
   const result = await mergeSheetIntoCopilotDb();
   console.log(`   ✅ MERGE done (affected rows: ${result.affected})`);
-  return { dryRun: false, preview, result };
+
+  console.log("\n—— Inactivate emails not on an active tab ——");
+  const inactivated = await inactivateMissingFromActiveTabs();
+  console.log(
+    `   ✅ status=inactive for ${inactivated.affected} copilot_db row(s) missing from every active tab`
+  );
+
+  const mtAccounts = await fillMissingMtAccounts({ dryRun: false });
+  return { dryRun: false, preview, result, inactivated, mtAccounts };
 }

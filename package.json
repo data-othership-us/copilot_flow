@@ -23,7 +23,8 @@
     "find-two-memberships": "node src/scripts/findTwoMemberships.js",
     "update-memberships": "node src/scripts/updateMemberships.js",
     "assign-memberships": "node src/scripts/assignMembershipsToUsers.js",
-    "find-reservations": "node src/scripts/findReservations.js"
+    "find-reservations": "node src/scripts/findReservations.js",
+    "apply-offboard-credits": "node src/scripts/applyOffboardCredits.js"
   },
   "engines": {
     "node": ">=20"

@@ -17,8 +17,8 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.copilots.copilot_db` (
   mt_profile_link STRING,
   promo_code STRING,
   bb_link STRING,             -- Brandbot / offer link
-  ig_handle STRING,           -- Instagram @handle (sheet + promote)
-  ig_url STRING,              -- clickable profile URL (applicant; else derived)
+  ig_handle STRING,           -- Instagram @handle(s); several accounts are newline-separated
+  ig_url STRING,              -- clickable profile URL(s); newline-separated when several
   ig_followers INT64,
   tiktok_handle STRING,      -- from application promote / applicant backfill
   tiktok_followers INT64,
@@ -27,11 +27,12 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.copilots.copilot_db` (
   -- percentage FLOAT64 — legacy; unused (join discount_codes if needed)
   offer_link STRING,          -- New special-offer URL (system-owned)
   status STRING,              -- active | inactive (ops sheet tabs)
-  decision STRING,            -- renew | offboard | never again | upgrade | downgrade | snooze | freeze
+  decision STRING,            -- onboard | renew | offboard | never again | upgrade | downgrade | snooze | freeze
   decision_notes STRING,
   decision_at TIMESTAMP,
   decision_source STRING,     -- e.g. evaluation_sheet | manual
   decision_applied_at TIMESTAMP,
+  payment_nudge_at TIMESTAMP,   -- last payment-method nudge for a held Review decision
   freeze_until DATE,
   never_again BOOL,           -- sticky: do not accept if they re-apply
   promoted_at TIMESTAMP,      -- When promoted from applicants / first seen
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.copilots.copilot_db` (
   mt_sales FLOAT64,
   mt_facing_amount FLOAT64,
   hybrid_sales FLOAT64,
+  new_hybrid_sales FLOAT64,   -- Review-tab ops input (evaluation-owned)
   combined_sales FLOAT64,     -- was MT_BB_HB on live table
   recovered_sales FLOAT64,
 
@@ -79,16 +81,18 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.copilots.copilot_db` (
 
 -- Column ownership:
 --   Sheet-owned (ops sync may UPDATE): identity display fields, bb_link,
---     ig_handle (@handle), sales, sheet_membership_expiry, section D ops, notes, status.
+--     ig_handle (@handle, newline-separated when several), sales, sheet_membership_expiry, section D ops, notes, status.
 --     NOT synced: classes_*, tiktok_*, other_channels, ig_followers
 --     (ig_followers is onboard seed only; live count is Modash on copilot_performance).
---     ig_url is applicant/promote-owned; sheet sync fills only when empty.
+--     ig_url is rebuilt from every parsed sheet handle; kept when the sheet cell is empty.
+--     After MERGE, copilot_db emails that are not already inactive and are
+--     missing from every active tab (including blank status) are set inactive.
 --   System-owned (never overwrite from ops sheet): user_id, mt_email, mt_profile_link,
 --     discount_id, promo_code, offer_link,
---     promoted_at, onboarded_at, acceptance_emailed_at, tiktok_*, other_channels, ig_url.
+--     promoted_at, onboarded_at, acceptance_emailed_at, tiktok_*, other_channels.
 --   Evaluation-owned (evaluation Sheet → DB; never ops sync): decision,
 --     decision_notes, decision_at, decision_source, decision_applied_at, freeze_until,
---     never_again.
+--     never_again, new_hybrid_sales, payment_nudge_at.
 --   Computed (copilot_performance view): membership (instances join), home_studio
 --     (mt_users home_location), classes, promo redemptions, Modash posting
 --     (modash_content / modash_creators; not written to this table).

@@ -14,6 +14,7 @@ import {
   buildNudgeStepsHtml,
   nudgeIntroLine,
 } from "../email/templateSteps.js";
+import { TIER_BENEFITS } from "../coPilotConstants.js";
 
 const emailsDir = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -84,6 +85,7 @@ export async function sendOnboardingNudge(input) {
       firstName: firstNameOrHey(input.firstName),
       signatureHtml: getEmailSignatureHtml(),
       introLine: nudgeIntroLine(hasMtAccount),
+      discountPercent: String(TIER_BENEFITS.seeker),
       stepsHtml: buildNudgeStepsHtml({
         hasMtAccount,
         applicantEmail: input.email,

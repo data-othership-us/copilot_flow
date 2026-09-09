@@ -1,5 +1,6 @@
 import { google } from "googleapis";
 import { config } from "../../config.js";
+import { isPlaceholderIgHandle, parseIgHandles } from "../instagram.js";
 
 const REVIEW_HEADERS = [
   "first_name",
@@ -10,9 +11,11 @@ const REVIEW_HEADERS = [
   "days_to_expiry",
   "membership_status",
   "membership_name",
+  "promo_code_status",
   "membership_start",
   "membership_end",
   "months_since_membership_start",
+  "copilot_months_active",
   "social_playgrounds_attended",
   "last_social_playground",
   "classes_taken_current_membership",
@@ -20,31 +23,43 @@ const REVIEW_HEADERS = [
   "ig_handle",
   "ig_url",
   "ig_followers",
-  "modash_posts",
   "modash_impressions",
-  "modash_reach",
-  "modash_views",
-  "modash_engagement",
+  "modash_stories_current_membership",
+  "modash_feed_posts_current_membership",
+  "social_requirement_met",
   "redemption_count_current_membership",
+  "redemption_usd_current_membership",
+  "redemption_cad_current_membership",
+  "cycle_points",
   "redemption_count_all_time",
-  "sales_effective",
+  "redemption_usd_all_time",
+  "redemption_cad_all_time",
+  "redemption_count_since_membership_end",
   "bb_sales",
   "hybrid_sales",
+  "new_hybrid_sales",
   "decision",
   "freeze_until",
   "decision_notes",
 ];
 
+function headerCol(name) {
+  const i = REVIEW_HEADERS.indexOf(name);
+  if (i < 0) throw new Error(`missing review header: ${name}`);
+  return i;
+}
+
 const COL = {
-  email: 2,
-  region: 3,
-  tier: 4,
-  daysToExpiry: 5,
-  bbSales: 26,
-  hybridSales: 27,
-  decision: 28,
-  freezeUntil: 29,
-  decisionNotes: 30,
+  email: headerCol("email"),
+  region: headerCol("region"),
+  tier: headerCol("tier"),
+  daysToExpiry: headerCol("days_to_expiry"),
+  bbSales: headerCol("bb_sales"),
+  hybridSales: headerCol("hybrid_sales"),
+  newHybridSales: headerCol("new_hybrid_sales"),
+  decision: headerCol("decision"),
+  freezeUntil: headerCol("freeze_until"),
+  decisionNotes: headerCol("decision_notes"),
 };
 
 const PRESERVED_COLS = [
@@ -53,9 +68,11 @@ const PRESERVED_COLS = [
   COL.decisionNotes,
   COL.bbSales,
   COL.hybridSales,
+  COL.newHybridSales,
 ];
 
 const DECISION_VALUES = [
+  "onboard",
   "renew",
   "offboard",
   "never again",
@@ -77,6 +94,36 @@ export function isOffboardLikeDecision(value) {
     .trim()
     .toLowerCase();
   return v === "offboard" || isNeverAgainDecision(v);
+}
+
+function parseDaysToExpiry(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Offboard / never again / renew / upgrade / downgrade: ops can fill
+ * Review in the 7-day window, but membership + email wait until last day
+ * (days_to_expiry <= 0). Missing days_to_expiry holds so we do not apply early.
+ */
+export function shouldHoldUntilExpiry(item) {
+  const decision = String(item?.decision || "")
+    .trim()
+    .toLowerCase();
+  const hold =
+    isOffboardLikeDecision(decision) ||
+    decision === "renew" ||
+    decision === "upgrade" ||
+    decision === "downgrade";
+  if (!hold) return false;
+  const days = parseDaysToExpiry(item?.daysToExpiry);
+  if (days == null) return true;
+  return days > 0;
+}
+
+/** @deprecated use shouldHoldUntilExpiry */
+export function shouldHoldOffboardUntilExpiry(item) {
+  return shouldHoldUntilExpiry(item);
 }
 
 const VALIDATION_ROW_CAP = 8000;
@@ -127,7 +174,8 @@ export function compareReviewRows(a, b) {
   if (region) return region;
   const tier = tierSortRank(a[COL.tier]) - tierSortRank(b[COL.tier]);
   if (tier) return tier;
-  const days = daysSortValue(a[COL.daysToExpiry]) - daysSortValue(b[COL.daysToExpiry]);
+  const days =
+    daysSortValue(a[COL.daysToExpiry]) - daysSortValue(b[COL.daysToExpiry]);
   if (days) return days;
   return textKey(a[COL.email]).localeCompare(textKey(b[COL.email]), undefined, {
     sensitivity: "base",
@@ -207,6 +255,15 @@ function fmtNum(value) {
   return value;
 }
 
+function fmtBool(value) {
+  if (value == null || value === "") return "";
+  if (typeof value === "object" && value.value != null)
+    return fmtBool(value.value);
+  if (value === true || value === "true") return "TRUE";
+  if (value === false || value === "false") return "FALSE";
+  return String(value);
+}
+
 function fmtDate(value) {
   if (!value) return "";
   if (typeof value === "object" && typeof value.value === "string") {
@@ -233,7 +290,7 @@ export function parseFreezeUntil(value) {
   const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (iso) {
     return new Date(
-      Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]), 12, 0, 0)
+      Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]), 12, 0, 0),
     );
   }
   const d = new Date(s);
@@ -271,7 +328,7 @@ export function parseMoney(value) {
 async function ensureTabs(sheets, spreadsheetId) {
   const meta = await sheets.spreadsheets.get({ spreadsheetId });
   const titles = new Set(
-    (meta.data.sheets || []).map((s) => s.properties?.title).filter(Boolean)
+    (meta.data.sheets || []).map((s) => s.properties?.title).filter(Boolean),
   );
   const requests = [];
   for (const title of [reviewTab(), addToModashTab()]) {
@@ -290,7 +347,7 @@ async function ensureTabs(sheets, spreadsheetId) {
 async function sheetProps(sheets, spreadsheetId, title) {
   const meta = await sheets.spreadsheets.get({ spreadsheetId });
   const found = (meta.data.sheets || []).find(
-    (s) => s.properties?.title === title
+    (s) => s.properties?.title === title,
   );
   if (!found) return null;
   return {
@@ -376,6 +433,19 @@ function listValidation(columnIndex, values, { strict }) {
   };
 }
 
+function clearValidations(endColumnIndex) {
+  return {
+    setDataValidation: {
+      range: {
+        startRowIndex: 1,
+        endRowIndex: VALIDATION_ROW_CAP,
+        startColumnIndex: 0,
+        endColumnIndex: Math.max(endColumnIndex, REVIEW_HEADERS.length + 8),
+      },
+    },
+  };
+}
+
 async function ensureDropdowns(sheets, spreadsheetId) {
   const reviewId = await ensureGridSize(sheets, spreadsheetId, reviewTab(), {
     rows: VALIDATION_ROW_CAP,
@@ -388,47 +458,95 @@ async function ensureDropdowns(sheets, spreadsheetId) {
       range: { ...req.setDataValidation.range, sheetId: reviewId },
     },
   });
+  const props = await sheetProps(sheets, spreadsheetId, reviewTab());
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
     requestBody: {
       requests: [
-        withSheet(listValidation(COL.decision, DECISION_VALUES, { strict: true })),
+        withSheet(
+          clearValidations(props?.columnCount || REVIEW_HEADERS.length),
+        ),
+        withSheet(
+          listValidation(COL.decision, DECISION_VALUES, { strict: true }),
+        ),
         withSheet(dateValidation(COL.freezeUntil)),
       ],
     },
   });
 }
 
+export const RESUBMIT_HANDLE_NOTE = "need to resubmit social handles";
+export const NO_MT_ACCOUNT_NOTE = "No MT account found";
+
+export function isResubmitIgRow(r) {
+  const raw = `${r?.ig_handle || ""} ${r?.ig_url || ""}`;
+  return /re-?submit/i.test(raw) || isPlaceholderIgHandle(r?.ig_handle);
+}
+
+export function isMissingMtAccountRow(r) {
+  return !String(r?.user_id ?? "").trim();
+}
+
+function appendDecisionNote(existing, note) {
+  const cur = String(existing || "").trim();
+  if (!note) return cur;
+  if (!cur) return note;
+  if (cur.toLowerCase().includes(note.toLowerCase())) return cur;
+  return `${cur}; ${note}`;
+}
+
+/** Stamp queue-flag notes without wiping ops / payment-nudge notes. */
+export function withQueueFlagNotes(cells, rec) {
+  const out = [...cells];
+  let notes = out[COL.decisionNotes];
+  if (isResubmitIgRow(rec)) {
+    notes = appendDecisionNote(notes, RESUBMIT_HANDLE_NOTE);
+  }
+  if (isMissingMtAccountRow(rec)) {
+    notes = appendDecisionNote(notes, NO_MT_ACCOUNT_NOTE);
+  }
+  out[COL.decisionNotes] = notes;
+  return out;
+}
+
 export function rowFromQueue(r) {
   return [
     r.first_name || "",
     r.last_name || "",
-    String(r.contact_email || "").trim().toLowerCase(),
+    String(r.contact_email || "")
+      .trim()
+      .toLowerCase(),
     r.region || "",
     r.tier || "",
     fmtNum(r.days_to_expiry),
     r.membership_status || "",
     r.membership_name || "",
+    r.promo_code_status || "",
     fmtDate(r.membership_start),
-    fmtDate(r.membership_end) || fmtDate(r.sheet_membership_expiry),
+    fmtDate(r.membership_end),
     fmtNum(r.months_since_membership_start),
+    fmtNum(r.copilot_months_active),
     fmtNum(r.social_playgrounds_attended),
     r.last_social_playground || "",
     fmtNum(r.classes_taken_current_membership),
     fmtDate(r.last_class_date),
-    r.ig_handle || "",
-    r.ig_url || "",
+    ...reviewIgCells(r),
     fmtNum(r.ig_followers),
-    fmtNum(r.modash_posts),
     fmtNum(r.modash_impressions),
-    fmtNum(r.modash_reach),
-    fmtNum(r.modash_views),
-    fmtNum(r.modash_engagement),
+    fmtNum(r.modash_stories_current_membership),
+    fmtNum(r.modash_feed_posts_current_membership),
+    fmtBool(r.social_requirement_met),
     fmtNum(r.redemption_count_current_membership),
+    fmtNum(r.redemption_usd_current_membership),
+    fmtNum(r.redemption_cad_current_membership),
+    fmtNum(r.cycle_points),
     fmtNum(r.redemption_count_all_time),
-    fmtNum(r.sales_effective),
+    fmtNum(r.redemption_usd_all_time),
+    fmtNum(r.redemption_cad_all_time),
+    fmtNum(r.redemption_count_since_membership_end),
     fmtNum(r.bb_sales),
     fmtNum(r.hybrid_sales),
+    fmtNum(r.new_hybrid_sales),
     "",
     "",
     "",
@@ -439,12 +557,18 @@ function parseSheetRows(values) {
   const header = values?.[0] || [];
   const idx = {};
   for (let i = 0; i < header.length; i++) {
-    idx[String(header[i] || "").trim().toLowerCase()] = i;
+    idx[
+      String(header[i] || "")
+        .trim()
+        .toLowerCase()
+    ] = i;
   }
   const rows = [];
   for (let r = 1; r < (values || []).length; r++) {
     const line = values[r] || [];
-    const email = String(line[idx.email] || "").trim().toLowerCase();
+    const email = String(line[idx.email] || "")
+      .trim()
+      .toLowerCase();
     if (!email) continue;
     rows.push({
       rowNumber: r + 1,
@@ -464,8 +588,16 @@ export async function readTab(tabName) {
   return parseSheetRows(res.data.values || []);
 }
 
-async function writeTabRows(sheets, spreadsheetId, tab, headers, rows) {
-  const end = colLetter(headers.length - 1);
+async function writeTabRows(
+  sheets,
+  spreadsheetId,
+  tab,
+  headers,
+  rows,
+  { valueInputOption = "RAW" } = {},
+) {
+  const props = await sheetProps(sheets, spreadsheetId, tab);
+  const end = colLetter(Math.max(headers.length, props?.columnCount || 0) - 1);
   await sheets.spreadsheets.values.clear({
     spreadsheetId,
     range: `'${tab}'!A:${end}`,
@@ -473,7 +605,7 @@ async function writeTabRows(sheets, spreadsheetId, tab, headers, rows) {
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range: `'${tab}'!A1`,
-    valueInputOption: "USER_ENTERED",
+    valueInputOption,
     requestBody: { values: [headers, ...rows] },
   });
 }
@@ -482,24 +614,50 @@ async function writeReviewRows(sheets, spreadsheetId, tab, rows) {
   await writeTabRows(sheets, spreadsheetId, tab, REVIEW_HEADERS, rows);
 }
 
-export function rowFromAddToModash(r) {
-  return [
+function reviewIgCells(r) {
+  const raw = r.ig_handle || r.ig_url || "";
+  const handles = parseIgHandles(raw);
+  if (handles.length) {
+    return [
+      handles.map((h) => `@${h}`).join("\n"),
+      handles.map((h) => `https://www.instagram.com/${h}/`).join("\n"),
+    ];
+  }
+  if (isPlaceholderIgHandle(raw) || /re-?submit/i.test(String(raw))) {
+    return ["re-submit", ""];
+  }
+  return [r.ig_handle || "", r.ig_url || ""];
+}
+
+function handleKey(handle) {
+  const parsed = parseIgHandles(handle);
+  return parsed[0] || "";
+}
+
+/** One sheet row per missing handle so the ig_handle column pastes into Modash. */
+export function rowsFromAddToModash(r) {
+  const handles = parseIgHandles(
+    [r.ig_handle, r.ig_url].filter(Boolean).join("\n")
+  );
+  return handles.map((bare) => [
     r.first_name || "",
     r.last_name || "",
     String(r.contact_email || "").trim().toLowerCase(),
     r.region || "",
     r.tier || "",
-    r.ig_handle || "",
-    r.ig_url || "",
+    `@${bare}`,
+    `https://www.instagram.com/${bare}/`,
     fmtNum(r.ig_followers),
     r.membership_status || "",
     fmtDate(r.membership_end),
-  ];
+  ]);
 }
 
 /**
- * Rebuild the Add to Modash tab from copilots whose IG handle is not
- * on the Modash Creators roster. Full rewrite each run.
+ * Rewrite Add to Modash in place. Creates the tab only if it is missing;
+ * never deletes the sheet. Clears values, then writes today's queue
+ * (one row per missing handle + clickable ig_url). Copy the ig_handle
+ * column into a Modash campaign.
  */
 export async function writeAddToModashQueue(queueRows) {
   const sheets = getSheetsClient();
@@ -515,14 +673,22 @@ export async function writeAddToModashQueue(queueRows) {
   const rebuilt = [];
   const seen = new Set();
   for (const rec of queueRows) {
-    const next = rowFromAddToModash(rec);
-    const email = next[2];
-    if (!email || seen.has(email)) continue;
-    rebuilt.push(next);
-    seen.add(email);
+    for (const next of rowsFromAddToModash(rec)) {
+      const key = handleKey(next[5]);
+      if (!key || seen.has(key)) continue;
+      rebuilt.push(next);
+      seen.add(key);
+    }
   }
 
-  await writeTabRows(sheets, id, tab, ADD_TO_MODASH_HEADERS, rebuilt);
+  await ensureGridSize(sheets, id, tab, {
+    rows: Math.max(rebuilt.length + 1, 2),
+    columns: ADD_TO_MODASH_HEADERS.length,
+  });
+
+  await writeTabRows(sheets, id, tab, ADD_TO_MODASH_HEADERS, rebuilt, {
+    valueInputOption: "USER_ENTERED",
+  });
 
   return { total: rebuilt.length, rebuilt: true };
 }
@@ -530,12 +696,24 @@ export async function writeAddToModashQueue(queueRows) {
 /**
  * Rewrite Review from the queue, sorted by region → tier → days to expiry.
  * Preserves Christine's decision / freeze_until / decision_notes / bb_sales /
- * hybrid_sales. Already-applied people are filtered in copilot_evaluation_queue.
+ * hybrid_sales / new_hybrid_sales for people still in the queue. If someone
+ * drops out (live term with more than 7 days left), they leave Review.
+ * `unappliedByEmail` restores those cells from copilot_db when they re-enter
+ * and the sheet cell is blank.
  */
-export async function appendReviewQueue(queueRows) {
+export async function appendReviewQueue(queueRows, { unappliedByEmail } = {}) {
   const sheets = getSheetsClient();
   const id = sheetId();
   const tab = reviewTab();
+  const unapplied =
+    unappliedByEmail instanceof Map
+      ? unappliedByEmail
+      : new Map(
+          Object.entries(unappliedByEmail || {}).map(([k, v]) => [
+            String(k).trim().toLowerCase(),
+            v,
+          ]),
+        );
 
   await ensureTabs(sheets, id);
 
@@ -551,18 +729,23 @@ export async function appendReviewQueue(queueRows) {
   const byEmail = new Map(reviewRows.map((r) => [r.email, r]));
 
   function mergePreserved(next, found) {
-    if (!found) return next;
-    const merged = [...next];
-    for (const i of PRESERVED_COLS) {
-      if (cellFilled(found.cells[i])) merged[i] = found.cells[i];
+    let merged = [...next];
+    if (found) {
+      for (const i of PRESERVED_COLS) {
+        if (cellFilled(found.cells[i])) merged[i] = found.cells[i];
+      }
     }
-    return merged;
+    const email = String(merged[COL.email] || "")
+      .trim()
+      .toLowerCase();
+    return overlayUnappliedDecision(merged, unapplied.get(email));
   }
 
   const rebuilt = [];
   const seen = new Set();
   let skipped = 0;
   let appended = 0;
+  const carried = 0;
 
   for (const rec of queueRows) {
     const next = rowFromQueue(rec);
@@ -570,7 +753,9 @@ export async function appendReviewQueue(queueRows) {
     if (!email || seen.has(email)) continue;
     if (byEmail.has(email)) skipped++;
     else appended++;
-    rebuilt.push(mergePreserved(next, byEmail.get(email)));
+    rebuilt.push(
+      withQueueFlagNotes(mergePreserved(next, byEmail.get(email)), rec),
+    );
     seen.add(email);
   }
 
@@ -581,9 +766,45 @@ export async function appendReviewQueue(queueRows) {
   return {
     appended,
     skipped,
+    carried,
     total: rebuilt.length,
     rebuilt: true,
   };
+}
+
+function padReviewCells(cells) {
+  const out = Array(REVIEW_HEADERS.length).fill("");
+  for (let i = 0; i < REVIEW_HEADERS.length; i++) {
+    out[i] = cells?.[i] ?? "";
+  }
+  return out;
+}
+
+function sheetDecisionValue(value) {
+  const parsed = parseDecision(value);
+  if (parsed) return parsed;
+  if (isNeverAgainDecision(value)) return "never again";
+  return "";
+}
+
+function overlayUnappliedDecision(merged, unapplied) {
+  if (!unapplied) return merged;
+  const out = [...merged];
+  const fromBq = sheetDecisionValue(unapplied.decision);
+  if (!cellFilled(out[COL.decision]) && fromBq) {
+    out[COL.decision] = fromBq;
+  }
+  if (
+    !cellFilled(out[COL.decisionNotes]) &&
+    cellFilled(unapplied.decision_notes)
+  ) {
+    out[COL.decisionNotes] = String(unapplied.decision_notes).trim();
+  }
+  if (!cellFilled(out[COL.freezeUntil]) && unapplied.freeze_until) {
+    const freeze = freezeUntilDateString(unapplied.freeze_until);
+    if (freeze) out[COL.freezeUntil] = freeze;
+  }
+  return out;
 }
 
 export function parseDecision(value) {
@@ -594,26 +815,59 @@ export function parseDecision(value) {
   return "";
 }
 
-/**
- * Review rows with a valid decision (not yet applied).
- */
+const PAYMENT_NUDGE_NOTE = "payment method nudge sent";
+
+/** Keep ops notes; add the hold marker if it is not already there. */
+export function withPaymentNudgeNote(existing) {
+  const cur = String(existing || "").trim();
+  if (!cur) return PAYMENT_NUDGE_NOTE;
+  if (cur.toLowerCase().includes("payment method nudge")) return cur;
+  return `${cur}; ${PAYMENT_NUDGE_NOTE}`;
+}
+
+/** Write decision_notes on the Review row for this email. Returns false if missing. */
+export async function patchReviewDecisionNotes(email, notes) {
+  const key = String(email || "")
+    .trim()
+    .toLowerCase();
+  if (!key) return false;
+  const { rows } = await readTab(reviewTab());
+  const found = rows.find((r) => r.email === key);
+  if (!found) return false;
+  const sheets = getSheetsClient();
+  const col = colLetter(COL.decisionNotes);
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId(),
+    range: `'${reviewTab()}'!${col}${found.rowNumber}`,
+    valueInputOption: "RAW",
+    requestBody: { values: [[notes]] },
+  });
+  return true;
+}
+
 export async function listSalesWritebacks(queueRows) {
   const { rows } = await readTab(reviewTab());
   const fromQueue = new Map(
     (queueRows || []).map((r) => [
-      String(r.contact_email || "").trim().toLowerCase(),
+      String(r.contact_email || "")
+        .trim()
+        .toLowerCase(),
       r,
-    ])
+    ]),
   );
   const patches = [];
   for (const r of rows) {
     const q = fromQueue.get(r.email) || {};
     const bb = parseMoney(r.cells[COL.bbSales]);
     const hybrid = parseMoney(r.cells[COL.hybridSales]);
+    const newHybrid = parseMoney(r.cells[COL.newHybridSales]);
     const fields = {};
     if (bb != null && bb !== parseMoney(q.bb_sales)) fields.bb_sales = bb;
     if (hybrid != null && hybrid !== parseMoney(q.hybrid_sales)) {
       fields.hybrid_sales = hybrid;
+    }
+    if (newHybrid != null && newHybrid !== parseMoney(q.new_hybrid_sales)) {
+      fields.new_hybrid_sales = newHybrid;
     }
     if (Object.keys(fields).length) {
       patches.push({ email: r.email, fields });
@@ -622,6 +876,7 @@ export async function listSalesWritebacks(queueRows) {
   return patches;
 }
 
+/** Review rows with a valid decision (not yet applied). */
 export async function listReadyDecisionsFromSheet() {
   const { rows } = await readTab(reviewTab());
   return rows
@@ -632,8 +887,10 @@ export async function listReadyDecisionsFromSheet() {
       decision: parseDecision(r.cells[COL.decision]),
       decisionNotes: String(r.cells[COL.decisionNotes] || "").trim(),
       freezeUntil: String(r.cells[COL.freezeUntil] || "").trim(),
+      daysToExpiry: parseDaysToExpiry(r.cells[COL.daysToExpiry]),
       bbSales: parseMoney(r.cells[COL.bbSales]),
       hybridSales: parseMoney(r.cells[COL.hybridSales]),
+      newHybridSales: parseMoney(r.cells[COL.newHybridSales]),
       cells: r.cells,
     }));
 }

@@ -49,3 +49,7 @@ export async function mtPost(path, data, params) {
 export async function mtPatch(path, data, params) {
   return request("patch", path, data, params);
 }
+
+export async function mtDelete(path, data, params) {
+  return request("delete", path, data, params);
+}

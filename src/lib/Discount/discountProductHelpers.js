@@ -1,4 +1,5 @@
 import productsData from "./discountProducts.json" assert { type: "json" };
+import { composeDisplayName } from "../notion/parseProps.js";
 
 function formatProductClass(productClass) {
   const name =
@@ -27,5 +28,6 @@ export function getNYCProductsForAPI() {
 export function formatDiscountName(tier, firstName, lastName) {
   const tierLabel =
     tier.charAt(0).toUpperCase() + tier.slice(1).toLowerCase();
-  return `${tierLabel} ${firstName} ${lastName}`.trim();
+  const person = composeDisplayName(firstName, lastName);
+  return `${tierLabel} ${person}`.trim();
 }

@@ -1,9 +1,9 @@
 import { ApifyClient } from "apify-client";
 import { config } from "../../config.js";
-import { bareIgHandle } from "../instagram.js";
+import { bareIgHandle, parseIgHandles } from "../instagram.js";
 
 export function normalizeInstagramHandle(handle) {
-  return bareIgHandle(handle);
+  return parseIgHandles(handle)[0] || bareIgHandle(handle);
 }
 
 function pickFollowers(profile) {

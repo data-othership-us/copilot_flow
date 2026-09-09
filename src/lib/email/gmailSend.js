@@ -10,7 +10,17 @@ import { google } from "googleapis";
 import { config } from "../../config.js";
 
 let cachedGmailClient = null;
-let cachedResolvedLabelId = null;
+const cachedLabelIds = new Map();
+
+/** Gmail labels for post-application Review / lifecycle mail. */
+const MANAGEMENT_EMAIL_KINDS = new Set([
+  "copilot_renewal",
+  "copilot_offboard",
+  "copilot_upgrade",
+  "copilot_downgrade",
+  "copilot_freeze",
+  "copilot_payment_nudge",
+]);
 
 export function getEmailSendMethod() {
   return String(config.email.sendMethod || "gmail_api").trim().toLowerCase();
@@ -86,25 +96,38 @@ function isCustomUserLabelId(labelId) {
   return /^Label_\d+$/i.test(String(labelId || "").trim());
 }
 
-async function resolveLabelId(gmail, userId) {
-  if (cachedResolvedLabelId) return cachedResolvedLabelId;
-  const configuredId = String(config.email.gmailLabelId || "").trim();
-  if (configuredId) {
-    if (!isCustomUserLabelId(configuredId)) {
+function labelConfigForKind(emailKind) {
+  if (MANAGEMENT_EMAIL_KINDS.has(String(emailKind || "").trim())) {
+    return {
+      name: config.email.gmailLabelNameManagement,
+      pinnedId: config.email.gmailLabelIdManagement,
+    };
+  }
+  return {
+    name: config.email.gmailLabelName,
+    pinnedId: config.email.gmailLabelId,
+  };
+}
+
+async function resolveLabelId(gmail, userId, { name, pinnedId } = {}) {
+  const pin = String(pinnedId || "").trim();
+  if (pin) {
+    if (!isCustomUserLabelId(pin)) {
       console.warn(
-        `⚠️ Ignoring non-custom GMAIL_API_LABEL_ID="${configuredId}". Expected Label_…`
+        `⚠️ Ignoring non-custom Gmail label id="${pin}". Expected Label_…`
       );
       return "";
     }
-    cachedResolvedLabelId = configuredId;
-    return configuredId;
+    return pin;
   }
-  const labelName = String(config.email.gmailLabelName || "").trim();
+  const labelName = String(name || "").trim();
   if (!labelName) return "";
+  if (cachedLabelIds.has(labelName)) return cachedLabelIds.get(labelName);
+
   const labelsResp = await gmail.users.labels.list({ userId });
   const existing = (labelsResp.data.labels || []).find((l) => l.name === labelName);
   if (existing?.id) {
-    cachedResolvedLabelId = existing.id;
+    cachedLabelIds.set(labelName, existing.id);
     return existing.id;
   }
   const created = await gmail.users.labels.create({
@@ -115,13 +138,15 @@ async function resolveLabelId(gmail, userId) {
       messageListVisibility: "show",
     },
   });
-  cachedResolvedLabelId = created.data.id || "";
-  return cachedResolvedLabelId;
+  const id = created.data.id || "";
+  if (id) cachedLabelIds.set(labelName, id);
+  return id;
 }
 
-async function applyConfiguredLabel(gmail, userId, messageId) {
+async function applyConfiguredLabel(gmail, userId, messageId, emailKind) {
   if (!messageId || !config.email.gmailAutoLabel) return;
-  const labelId = await resolveLabelId(gmail, userId);
+  const { name, pinnedId } = labelConfigForKind(emailKind);
+  const labelId = await resolveLabelId(gmail, userId, { name, pinnedId });
   if (!labelId) return;
   await gmail.users.messages.modify({
     userId,
@@ -134,10 +159,73 @@ function sanitizeHeader(value) {
   return String(value || "").replace(/[\r\n]+/g, " ").trim();
 }
 
+/**
+ * Strip wrapping junk so a trailing period / mailto / angle brackets
+ * do not fail Gmail's To header.
+ */
+export function sanitizeEmailAddress(raw) {
+  let s = String(raw || "").trim();
+  s = s.replace(/^mailto:/i, "").trim();
+  const angled = s.match(/<([^>]+)>/);
+  if (angled) s = angled[1].trim();
+  s = s.replace(/^['"]+|['"]+$/g, "").trim();
+  s = s.replace(/^[,;:\s]+/, "").replace(/[,;:\s.]+$/g, "");
+  return s;
+}
+
+export function isPlausibleEmailAddress(value) {
+  const s = sanitizeEmailAddress(value);
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+}
+
+export function isInvalidRecipientError(error) {
+  if (!error) return false;
+  if (error.code === "invalid_recipient") return true;
+  const blob = `${error.message || ""} ${JSON.stringify(error.response?.data || "")}`;
+  return /invalid to header/i.test(blob);
+}
+
+function invalidRecipientError(raw) {
+  const err = new Error(`Invalid To address: ${JSON.stringify(raw)}`);
+  err.code = "invalid_recipient";
+  return err;
+}
+
+function recipientCandidates(primary, fallback) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of [primary, fallback]) {
+    const s = sanitizeEmailAddress(raw);
+    if (!s || !isPlausibleEmailAddress(s)) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
+}
+
 function encodeHeader(value) {
   const clean = sanitizeHeader(value);
   if (/^[\x20-\x7E]*$/.test(clean)) return clean;
   return `=?UTF-8?B?${Buffer.from(clean, "utf8").toString("base64")}?=`;
+}
+
+/** Othership eggplant (brand ink) for bold copy. */
+export const EGGPLANT = "#2E1B33";
+
+function applyEggplantToBold(html) {
+  return String(html || "").replace(/<(strong|b)\b([^>]*)>/gi, (full, tag, attrs) => {
+    const attr = attrs || "";
+    if (/style\s*=/i.test(attr)) {
+      if (/color\s*:/i.test(attr)) return full;
+      return `<${tag}${attr.replace(
+        /style\s*=\s*(["'])([^"']*)\1/i,
+        (_, q, style) => `style=${q}${style}; color: ${EGGPLANT}${q}`
+      )}>`;
+    }
+    return `<${tag}${attr} style="color: ${EGGPLANT}">`;
+  });
 }
 
 function wrapBase64(value) {
@@ -185,6 +273,7 @@ function buildMimeMessage(p) {
 /**
  * @param {object} p
  * @param {string} p.to
+ * @param {string} [p.fallbackTo] MT email if contact To is rejected
  * @param {string} [p.from]
  * @param {string} p.subject
  * @param {string} p.html
@@ -192,7 +281,7 @@ function buildMimeMessage(p) {
  * @param {boolean} [p.applyLabel]
  * @param {string} [p.emailKind]
  * @param {Record<string, unknown>} [p.logContext]
- * @returns {Promise<{ messageId: string, threadId: string }>}
+ * @returns {Promise<{ messageId: string, threadId: string, to: string }>}
  */
 export async function sendCopilotEmail(p) {
   validateEmailSenderConfig();
@@ -201,45 +290,77 @@ export async function sendCopilotEmail(p) {
     throw new Error("Missing EMAIL_FROM (or p.from) for Co-Pilot send");
   }
 
+  const candidates = recipientCandidates(p.to, p.fallbackTo);
+  if (!candidates.length) {
+    throw invalidRecipientError(p.to);
+  }
+
   const gmail = getGmailClient();
   const userId = String(config.email.gmailUser || "me").trim() || "me";
-  const response = await gmail.users.messages.send({
-    userId,
-    requestBody: {
-      raw: toBase64Url(
-        buildMimeMessage({
-          from,
-          to: p.to,
-          cc: p.cc,
-          subject: p.subject,
-          html: p.html,
-        })
-      ),
-    },
-  });
+  const html = applyEggplantToBold(p.html);
+  let lastError = null;
 
-  const messageId = response.data.id || "";
-  const threadId = response.data.threadId || "";
-  if (p.applyLabel !== false) {
-    await applyConfiguredLabel(gmail, userId, messageId);
+  for (let i = 0; i < candidates.length; i++) {
+    const to = candidates[i];
+    try {
+      const response = await gmail.users.messages.send({
+        userId,
+        requestBody: {
+          raw: toBase64Url(
+            buildMimeMessage({
+              from,
+              to,
+              cc: p.cc,
+              subject: p.subject,
+              html,
+            })
+          ),
+        },
+      });
+
+      const messageId = response.data.id || "";
+      const threadId = response.data.threadId || "";
+      const kind = String(p.emailKind || "").trim();
+      if (p.applyLabel !== false) {
+        await applyConfiguredLabel(gmail, userId, messageId, kind);
+      }
+
+      if (to.toLowerCase() !== sanitizeEmailAddress(p.to).toLowerCase()) {
+        console.warn(
+          `   📧 sent to MT email ${to} (contact email failed: ${p.to})`
+        );
+      }
+
+      if (kind) {
+        const { name: gmailLabel } = labelConfigForKind(kind);
+        console.log(
+          JSON.stringify({
+            event: "copilot_email_sent",
+            emailKind: kind,
+            gmailLabel,
+            to,
+            subject: String(p.subject || "").trim().slice(0, 240),
+            messageId,
+            threadId,
+            ...(p.logContext && typeof p.logContext === "object"
+              ? p.logContext
+              : {}),
+          })
+        );
+      }
+
+      return { messageId, threadId, to };
+    } catch (error) {
+      if (!isInvalidRecipientError(error)) throw error;
+      lastError = invalidRecipientError(to);
+      const next = candidates[i + 1];
+      if (next) {
+        console.warn(`   ⚠️  To ${to} rejected — trying ${next}`);
+      }
+    }
   }
 
-  const kind = String(p.emailKind || "").trim();
-  if (kind) {
-    console.log(
-      JSON.stringify({
-        event: "copilot_email_sent",
-        emailKind: kind,
-        to: String(p.to || "").trim(),
-        subject: String(p.subject || "").trim().slice(0, 240),
-        messageId,
-        threadId,
-        ...(p.logContext && typeof p.logContext === "object" ? p.logContext : {}),
-      })
-    );
-  }
-
-  return { messageId, threadId };
+  throw lastError || invalidRecipientError(p.to);
 }
 
 /**

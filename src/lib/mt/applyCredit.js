@@ -45,7 +45,7 @@ function buildCreditTransactionPayload(mtUserId, creditId, note) {
 }
 
 /**
- * @param {{ mtUserId: string, mtUserEmail?: string, creditId?: string, note?: string, logContext?: object }} input
+ * @param {{ mtUserId: string, mtUserEmail?: string, creditId?: string, note?: string, source?: string, logContext?: object }} input
  */
 export async function applyMtCredit(input) {
   const creditId = String(
@@ -78,7 +78,7 @@ export async function applyMtCredit(input) {
   console.log(
     JSON.stringify({
       event: "mt_credit_applied",
-      source: "copilot_rejection",
+      source: input.source || "copilot_rejection",
       mtUserId: String(input.mtUserId),
       email: input.mtUserEmail || null,
       creditProductId: creditId,

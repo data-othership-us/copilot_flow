@@ -2,10 +2,13 @@ import { mtGet, mtPost } from "../mt/marianatekClient.js";
 import {
   getValidBankcardId,
   hasValidBankcardOnFile,
+  isPaymentMethodError,
+  paymentMethodError,
 } from "../mt/bankcards.js";
 import {
   getCartTotal,
   prepareCartForMembership,
+  restoreParkedCartItems,
 } from "../mt/cartHelpers.js";
 import {
   locationIdFromHomeStudio,
@@ -67,10 +70,82 @@ export async function findLiveCopilotMembership(userId) {
   return pickLiveCopilotMembership(instances);
 }
 
+export function copilotMembershipEndAt(instance) {
+  const raw =
+    instance?.attributes?.calculated_end_datetime ||
+    instance?.attributes?.end_datetime ||
+    instance?.attributes?.end_date;
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function membershipStartAt(instance) {
+  const raw =
+    instance?.attributes?.calculated_start_datetime ||
+    instance?.attributes?.start_date ||
+    instance?.attributes?.start_datetime;
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function inferTierFromMembershipName(name) {
+  const n = String(name || "").toLowerCase();
+  if (n.includes("luminary")) return "Luminary";
+  if (n.includes("wayfinder")) return "Wayfinder";
+  if (n.includes("seeker")) return "Seeker";
+  return null;
+}
+
+/**
+ * A Co-Pilot term of `tier` that already starts at/after `startAt`
+ * (pending stack) or after `decisionAt` (idempotent retry).
+ */
+export function pickStackedCopilotMembership(
+  instances,
+  { tier, startAt = null, decisionAt = null } = {}
+) {
+  const want = String(tier || "").toLowerCase();
+  const intended = startAt instanceof Date && !Number.isNaN(startAt.getTime())
+    ? startAt.getTime()
+    : null;
+  const since = decisionAt ? new Date(decisionAt) : null;
+  const sinceMs =
+    since && !Number.isNaN(since.getTime()) ? since.getTime() - 5 * 60 * 1000 : null;
+
+  const matches = (instances || []).filter((m) => {
+    if (!isCopilotMembershipName(m?.attributes?.membership_name)) return false;
+    const liveTier = inferTierFromMembershipName(m?.attributes?.membership_name);
+    if (!liveTier || liveTier.toLowerCase() !== want) return false;
+    const start = membershipStartAt(m);
+    if (!start) return false;
+    if (intended != null && Math.abs(start.getTime() - intended) < 24 * 60 * 60 * 1000) {
+      return true;
+    }
+    if (sinceMs != null && start.getTime() >= sinceMs) return true;
+    return false;
+  });
+  matches.sort((a, b) => {
+    const aStart = membershipStartAt(a)?.getTime() || 0;
+    const bStart = membershipStartAt(b)?.getTime() || 0;
+    return bStart - aStart;
+  });
+  return matches[0] || null;
+}
+
 async function resolveChildMembershipId(tier, regionKey) {
   const key = normalizeTierKey(tier);
   const hardcoded = CHILD_MEMBERSHIPS[key]?.[regionKey];
+  // Prefer the known Co-Pilot child ids. Listing `/child_product_memberships?product=`
+  // is not filtered by parent and can return unrelated memberships (e.g. Adelaide Unlimited).
+  if (hardcoded) return hardcoded;
+
   const parentId = PARENT_PRODUCTS[key]?.[regionKey];
+  const want = new RegExp(
+    `${key}\\s+${regionKey}\\s+co[\\s-]?pilot`,
+    "i"
+  );
 
   if (parentId) {
     try {
@@ -79,20 +154,13 @@ async function resolveChildMembershipId(tier, regionKey) {
       });
       const children = response?.data;
       const list = Array.isArray(children) ? children : children ? [children] : [];
-      if (list[0]?.id) return String(list[0].id);
+      const match = list.find((c) => want.test(String(c?.attributes?.name || "")));
+      if (match?.id) return String(match.id);
     } catch {
-      try {
-        const response = await mtGet("/child_products", { product: parentId });
-        const children = response?.data;
-        const list = Array.isArray(children) ? children : children ? [children] : [];
-        if (list[0]?.id) return String(list[0].id);
-      } catch {
-        // fall through to hardcoded
-      }
+      // fall through
     }
   }
 
-  if (hardcoded) return hardcoded;
   throw new Error(`No membership product for tier=${tier} region=${regionKey}`);
 }
 
@@ -115,6 +183,8 @@ async function resolveLocationAndPartner({ userId, homeStudio, region }) {
 
 /**
  * Assign a Co-Pilot membership via MT cart checkout (no charge).
+ * Does not terminate a live term. By default skips if one is already live;
+ * `allowAlongsideExpiring` adds a new term starting now on expiry day.
  * @returns {Promise<{ skipped?: string, membership?: object }>}
  */
 export async function assignCopilotMembership({
@@ -123,12 +193,13 @@ export async function assignCopilotMembership({
   region,
   homeStudio,
   tier = "Seeker",
+  allowAlongsideExpiring = false,
   dryRun = false,
 }) {
   if (!userId) throw new Error("userId is required to assign membership");
 
   const existing = await findLiveCopilotMembership(userId);
-  if (existing) {
+  if (existing && !allowAlongsideExpiring) {
     return {
       skipped: "already_has_live_copilot_membership",
       membership: existing,
@@ -151,7 +222,7 @@ export async function assignCopilotMembership({
 
   const hasCc = await hasValidBankcardOnFile(userId);
   if (!hasCc) {
-    throw new Error("no_cc_on_file");
+    throw paymentMethodError("no_cc_on_file");
   }
 
   if (dryRun) {
@@ -165,49 +236,101 @@ export async function assignCopilotMembership({
 
   const paymentMethodId = await getValidBankcardId(userId);
   if (!paymentMethodId) {
-    throw new Error("no_cc_on_file");
+    throw paymentMethodError("no_cc_on_file");
   }
 
-  const { cartId } = await prepareCartForMembership({
-    userId,
-    partnerId: resolved.partnerId,
-    membershipProductId: childId,
-    productType: "child_product_memberships",
-  });
+  const beforeIds = new Set(
+    (await listMembershipsForUser(userId)).map((m) => String(m.id))
+  );
 
-  const amount = await getCartTotal(cartId);
-  const checkoutData = await mtPost("/checkouts", {
-    data: {
-      type: "checkouts",
-      attributes: {
-        payments: [
-          {
-            amount,
-            type: "bankcard",
-            id: String(paymentMethodId),
-          },
-        ],
-        status: null,
-      },
-      relationships: {
-        cart: { data: { type: "carts", id: String(cartId) } },
-        for_reservation: { data: null },
-        originating_partner: {
-          data: { type: "partners", id: String(resolved.partnerId) },
-        },
-      },
-    },
-  });
-
-  return {
-    membership: {
-      checkoutId: checkoutData?.data?.id ?? null,
-      cartId,
-      childProductId: childId,
-      region: resolved.region,
+  let parked = [];
+  let cartId;
+  try {
+    const prepared = await prepareCartForMembership({
+      userId,
       partnerId: resolved.partnerId,
-    },
-  };
+      membershipProductId: childId,
+      productType: "child_product_memberships",
+    });
+    cartId = prepared.cartId;
+    parked = prepared.parked || [];
+
+    const amount = await getCartTotal(cartId);
+    let checkoutData;
+    try {
+      checkoutData = await mtPost("/checkouts", {
+        data: {
+          type: "checkouts",
+          attributes: {
+            payments: [
+              {
+                amount,
+                type: "bankcard",
+                id: String(paymentMethodId),
+              },
+            ],
+            status: null,
+          },
+          relationships: {
+            cart: { data: { type: "carts", id: String(cartId) } },
+            for_reservation: { data: null },
+            originating_partner: {
+              data: { type: "partners", id: String(resolved.partnerId) },
+            },
+          },
+        },
+      });
+    } catch (error) {
+      if (isPaymentMethodError(error)) {
+        throw paymentMethodError(error.message);
+      }
+      throw error;
+    }
+
+    if (parked.length) {
+      try {
+        await restoreParkedCartItems({
+          userId,
+          partnerId: resolved.partnerId,
+          parked,
+        });
+      } catch (error) {
+        console.warn(
+          `   ⚠️  Membership assigned but failed to restore parked cart items: ${error.message}`
+        );
+      }
+    }
+
+    const after = await listMembershipsForUser(userId);
+    const created = after.filter((m) => !beforeIds.has(String(m.id)));
+    const createdId = created[0]?.id ? String(created[0].id) : null;
+
+    return {
+      membership: {
+        checkoutId: checkoutData?.data?.id ?? null,
+        cartId,
+        childProductId: childId,
+        region: resolved.region,
+        partnerId: resolved.partnerId,
+        instanceId: createdId,
+      },
+    };
+  } catch (error) {
+    if (parked.length) {
+      try {
+        await restoreParkedCartItems({
+          userId,
+          partnerId: resolved.partnerId,
+          parked,
+        });
+      } catch (restoreError) {
+        console.warn(
+          `   ⚠️  Failed to restore parked cart items after membership error: ${restoreError.message}`
+        );
+      }
+    }
+    throw error;
+  }
 }
 
 export async function terminateMembershipInstance(membershipInstanceId) {

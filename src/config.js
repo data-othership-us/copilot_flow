@@ -39,6 +39,13 @@ export const config = {
   reevaluateEvaluated: envBool("REEVALUATE_EVALUATED", false),
   /** Re-run MT + social enrichment for all Status=Accepted pages (keeps Accepted; no nudge/email). */
   reevaluateAccepted: envBool("REEVALUATE_ACCEPTED", false),
+  /** Rebuild Review / Add to Modash without ingesting or applying filled decisions. */
+  evaluateSkipApply: envBool("EVALUATE_SKIP_APPLY", false),
+  /** Comma-separated emails: apply (or dry-run) only these Review rows. */
+  evaluateEmails: env("EVALUATE_EMAILS", "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
 
   notion: {
     token: env("NOTION_TOKEN"),
@@ -170,7 +177,7 @@ export const config = {
   /** Min scraped followers for 🟢 / 🟡 / 🔴 page icons */
   qualifiedMinFollowers: envInt("QUALIFIED_MIN_FOLLOWERS", 1500),
 
-  /** Days between onboarding nudges for Accepted-but-blocked applicants */
+  /** Days between onboarding nudges (Accepted applicants) and Review-tab payment-method nudges */
   nudgeCooldownDays: envInt("NUDGE_COOLDOWN_DAYS", 3),
   /**
    * Only inspect Onboarded cards edited in this many days when moving
@@ -179,12 +186,14 @@ export const config = {
   reclaimOnboardedLookbackDays: envInt("RECLAIM_ONBOARDED_LOOKBACK_DAYS", 30),
 
   /**
-   * Gmail API — Co-Pilot mailbox (nudge + rejection from this job).
+   * Gmail API — Co-Pilot mailbox.
+   * Applications label: rejection + onboarding nudge.
+   * Management label: Review lifecycle (renew / offboard / upgrade / downgrade / freeze / payment nudge).
    * Auth a separate Google account via: npm run gmail-oauth
    */
   email: {
     sendMethod: env("EMAIL_SEND_METHOD", "gmail_api").toLowerCase(),
-    from: env("EMAIL_FROM", ""),
+    from: env("EMAIL_FROM", "Othership Co-Pilot Program <copilots@othership.us>"),
     gmailClientId: env("GMAIL_API_CLIENT_ID"),
     gmailClientSecret: env("GMAIL_API_CLIENT_SECRET"),
     /** Prefer Co-Pilot-specific token; GMAIL_API_REFRESH_TOKEN is a generic fallback */
@@ -193,14 +202,34 @@ export const config = {
     gmailUser: env("GMAIL_API_USER", "me"),
     gmailLabelName: env("GMAIL_API_LABEL_NAME", "Co-Pilot Applications"),
     gmailLabelId: env("GMAIL_API_LABEL_ID", ""),
+    gmailLabelNameManagement: env(
+      "GMAIL_API_LABEL_NAME_MANAGEMENT",
+      "Co-Pilot Management"
+    ),
+    gmailLabelIdManagement: env("GMAIL_API_LABEL_ID_MANAGEMENT", ""),
     gmailAutoLabel: envBool("GMAIL_API_AUTO_LABEL", true),
   },
 
-  /** Optional URLs interpolated into the acceptance email. */
+  /** Optional URLs interpolated into lifecycle emails. */
   copilotLinks: {
-    applyUrl: env("COPILOT_APPLY_URL", ""),
+    applyUrl: env("COPILOT_APPLY_URL", "https://tally.so/r/mDVGpq"),
     breathworkPersonalUrl: env("COPILOT_BREATHWORK_PERSONAL_URL", ""),
-    breathworkCommunityUrl: env("COPILOT_BREATHWORK_COMMUNITY_URL", ""),
+    breathworkCommunityUrl: env(
+      "COPILOT_BREATHWORK_COMMUNITY_URL",
+      "https://apps.apple.com/redeem?ctx=offercodes&id=1590348936&code=COPILOT1"
+    ),
+    seekerHubUrl: env(
+      "COPILOT_SEEKER_HUB_URL",
+      "https://app.notion.com/p/othership/Seeker-Hub-299271660d72803d8291e80032fdff4c"
+    ),
+    wayfinderHubUrl: env(
+      "COPILOT_WAYFINDER_HUB_URL",
+      "https://app.notion.com/p/othership/Wayfinder-Hub-299271660d7280398958ed331855e188"
+    ),
+    luminaryHubUrl: env(
+      "COPILOT_LUMINARY_HUB_URL",
+      "https://app.notion.com/p/othership/Luminary-Hub-299271660d7280f0be49fa910625ecc4"
+    ),
   },
 
   /** Christine evaluation sheet (queue from copilot_evaluation_queue). */

@@ -5,6 +5,7 @@ import {
   getBqConfig,
 } from "../bqConfig.js";
 import { splitIgIdentity } from "../instagram.js";
+import { normalizePersonName } from "../notion/parseProps.js";
 
 function tableRef() {
   return copilotApplicantsRef();
@@ -789,6 +790,7 @@ export async function promoteToCopilotDb(applicant) {
 
   const region = normalizeCopilotRegion(applicant.region);
   const tier = applicant.tier?.trim() || "Seeker";
+  const person = normalizePersonName(applicant.first_name, applicant.last_name);
   const ig = splitIgIdentity(
     applicant.ig_handle ?? applicant.ig_url ?? applicant.social_handle ?? null
   );
@@ -856,8 +858,8 @@ export async function promoteToCopilotDb(applicant) {
     ...queryOptions(
       {
         email,
-        first_name: applicant.first_name ?? null,
-        last_name: applicant.last_name ?? null,
+        first_name: person.firstName || null,
+        last_name: person.lastName || null,
         region,
         tier,
         mt_user_id: applicant.mt_user_id ?? null,

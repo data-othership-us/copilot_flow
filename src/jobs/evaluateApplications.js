@@ -59,11 +59,13 @@ import {
 } from "../lib/social/enrichProfile.js";
 import { findLiveCopilotMembership } from "../lib/Membership/assignCopilotMembership.js";
 import { buildOfferLink } from "../lib/offerLink.js";
+import { findExistingCopilotPromo } from "../lib/onboard/existingPromo.js";
 import {
   holdIfPreviouslyOffboarded,
   isNeverAgain,
   prepareCopilotForReonboard,
   refuseNeverAgainApplication,
+  resolveNeedsReview,
 } from "../lib/onboard/priorOffboard.js";
 
 /**
@@ -170,15 +172,25 @@ async function processReclaimIncompleteOnboarded(summary) {
 }
 
 /**
- * Ops-sheet copilots already provisioned (promo code AND live Co-Pilot membership).
- * Stamp onboarded — do not queue the onboard job (no second membership/email).
+ * Already provisioned (promo code AND live Co-Pilot membership), including
+ * people ops onboarded by hand who are not in copilot_db yet.
+ * Insert if missing, stamp onboarded — do not create a second membership/email.
  */
-async function stampOnboardedIfAlreadyProvisioned(app, email, userId) {
-  const copilot = await getCopilotByEmail(email);
-  const promo = String(copilot?.promo_code || "").trim();
-  if (!copilot || !promo) return false;
+async function stampOnboardedIfAlreadyProvisioned(app, email, userId, mt = null) {
+  let copilot = await getCopilotByEmail(email);
 
-  const uid = userId || copilot.user_id;
+  const existingPromo = await findExistingCopilotPromo({
+    firstName: copilot?.first_name || app.firstName,
+    lastName: copilot?.last_name || app.lastName,
+    email,
+    promoCode: copilot?.promo_code,
+    discountId: copilot?.discount_id,
+    tier: copilot?.tier || "Seeker",
+  });
+  const promo = String(existingPromo?.promoCode || "").trim();
+  if (!promo) return false;
+
+  const uid = userId || copilot?.user_id;
   const live = await findLiveCopilotMembership(uid);
   if (!live) {
     console.log(
@@ -186,18 +198,46 @@ async function stampOnboardedIfAlreadyProvisioned(app, email, userId) {
     );
     return false;
   }
-  if (copilot.onboarded_at) return true;
+  if (copilot?.onboarded_at) return true;
 
   if (config.dryRun) {
     console.log(
-      `   (DRY_RUN: would mark Onboarded — promo ${promo} + live Co-Pilot membership)`
+      copilot
+        ? `   (DRY_RUN: would mark Onboarded — promo ${promo} + live Co-Pilot membership)`
+        : `   (DRY_RUN: would INSERT copilot_db + mark Onboarded — promo ${promo} + live Co-Pilot membership)`
     );
     return true;
   }
 
+  if (!copilot) {
+    await promoteToCopilotDb({
+      email,
+      first_name: app.firstName,
+      last_name: app.lastName,
+      region: app.region,
+      tier: "Seeker",
+      mt_user_id: uid,
+      mt_email: mt?.mtEmail,
+      mt_profile_link: mt?.mtProfileLink,
+      ig_handle: app.igHandle || null,
+      ig_url: app.igUrl || null,
+      ig_followers: app.igFollowers ?? null,
+      tiktok_handle: app.tiktokHandle || null,
+      tiktok_followers: app.tiktokFollowers ?? null,
+      other_channels: app.otherChannels || null,
+    });
+    if (app.notionPageId) await markPromoted(app.notionPageId);
+    copilot = await getCopilotByEmail(email);
+  }
+
   const offerLink = buildOfferLink(promo);
-  const patch = { onboarded_at: "NOW", promoted_at: "NOW" };
-  if (offerLink && !String(copilot.offer_link || "").trim()) {
+  const patch = {
+    onboarded_at: "NOW",
+    promoted_at: "NOW",
+    promo_code: promo,
+  };
+  if (existingPromo.discountId) patch.discount_id = existingPromo.discountId;
+  if (offerLink && !String(copilot?.offer_link || "").trim()) {
     patch.offer_link = offerLink;
   }
   await updateCopilotByEmail(email, patch);
@@ -751,7 +791,8 @@ async function processReevaluateEvaluated(summary) {
 
 /**
  * Pass 2: Notion "Accepted"
- * - Previously offboarded → comment + Re-onboard=Needs review; wait for ops
+ * - Re-onboard=Needs review + inactive/missing roster → Status=Evaluated
+ * - Re-onboard=Needs review + already active in copilot_db → Status=Onboarded
  * - Missing MT account or CC → nudge (cooldown) and skip promote/onboard
  * - Ready → clear nudge flags and promote to copilot_db
  */
@@ -778,18 +819,31 @@ async function processAcceptedApplications(summary) {
       continue;
     }
 
-    const mt = await enrichApplicantFromMt(app.email);
-    await sleep(config.requestDelayMs);
-    console.log(
-      `   MT: account=${mt.mtAccountExists} user=${mt.mtUserId ?? "—"} cc=${mt.mtHasCc === null ? "?" : mt.mtHasCc} studio=${mt.mtHomeStudio ?? "?"}`
-    );
-
     let copilot = null;
     try {
       copilot = await getCopilotByEmail(app.email);
     } catch (error) {
       console.warn(`   ⚠️  copilot_db lookup failed: ${error.message}`);
     }
+
+    const needsReviewAction = await resolveNeedsReview(app, copilot, {
+      dryRun: config.dryRun,
+      email: app.email,
+    });
+    if (needsReviewAction === "evaluated") {
+      summary.acceptedReonboardHold++;
+      continue;
+    }
+    if (needsReviewAction === "onboarded") {
+      summary.acceptedReonboardOnboarded++;
+      continue;
+    }
+
+    const mt = await enrichApplicantFromMt(app.email);
+    await sleep(config.requestDelayMs);
+    console.log(
+      `   MT: account=${mt.mtAccountExists} user=${mt.mtUserId ?? "—"} cc=${mt.mtHasCc === null ? "?" : mt.mtHasCc} studio=${mt.mtHomeStudio ?? "?"}`
+    );
 
     const hold = await holdIfPreviouslyOffboarded(app, copilot, {
       dryRun: config.dryRun,
@@ -888,7 +942,8 @@ async function processAcceptedApplications(summary) {
       const stamped = await stampOnboardedIfAlreadyProvisioned(
         app,
         app.email,
-        mt.mtUserId
+        mt.mtUserId,
+        mt
       );
       if (stamped) {
         summary.acceptedSkipped++;
@@ -921,6 +976,16 @@ async function processAcceptedApplications(summary) {
     };
 
     if (config.dryRun) {
+      const stamped = await stampOnboardedIfAlreadyProvisioned(
+        app,
+        app.email,
+        mt.mtUserId,
+        mt
+      );
+      if (stamped) {
+        summary.acceptedSkipped++;
+        continue;
+      }
       console.log("   (DRY_RUN: would clear nudge flags + promote to copilot_db)");
       summary.acceptedPromoted++;
       continue;
@@ -937,10 +1002,10 @@ async function processAcceptedApplications(summary) {
       }
       if (result === "exists") {
         console.log("   ℹ️  contact_email already in copilot_db");
-        await stampOnboardedIfAlreadyProvisioned(app, app.email, mt.mtUserId);
       } else {
         console.log("   ✅ Inserted into copilot_db");
       }
+      await stampOnboardedIfAlreadyProvisioned(app, app.email, mt.mtUserId, mt);
       await markPromoted(app.notionPageId);
       summary.acceptedPromoted++;
     } catch (error) {
@@ -1168,6 +1233,7 @@ export async function evaluateApplications() {
     acceptedFailed: 0,
     acceptedCutoffSkipped: 0,
     acceptedReonboardHold: 0,
+    acceptedReonboardOnboarded: 0,
     acceptedReonboardDeclined: 0,
     acceptedNeverAgain: 0,
     neverAgainRejected: 0,
@@ -1274,7 +1340,12 @@ export async function evaluateApplications() {
   );
   if (summary.acceptedReonboardHold) {
     console.log(
-      `   Previously offboarded — waiting on ops: ${summary.acceptedReonboardHold}`
+      `   Previously offboarded — moved to Evaluated (Needs review): ${summary.acceptedReonboardHold}`
+    );
+  }
+  if (summary.acceptedReonboardOnboarded) {
+    console.log(
+      `   Needs review but already active — Notion Onboarded: ${summary.acceptedReonboardOnboarded}`
     );
   }
   if (summary.acceptedReonboardDeclined) {

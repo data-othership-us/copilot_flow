@@ -26,6 +26,13 @@ export const TIER_BENEFITS = {
   luminary: Number(process.env.COPILOT_LUMINARY_DISCOUNT_PERCENT || 18),
 };
 
+/** Cycle points from promo code usage and 2-for-1 link redemption. */
+export const CYCLE_STAY_POINTS = {
+  seeker: 5,
+  wayfinder: 20,
+  luminary: 100,
+};
+
 export const TIER_TO_PRODUCT_KEY = {
   seeker: "coPilot",
   wayfinder: "wayfinder",

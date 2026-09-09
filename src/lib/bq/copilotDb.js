@@ -44,8 +44,10 @@ const COPILOT_DB_EXTRA_COLUMNS = [
   "decision_at TIMESTAMP",
   "decision_source STRING",
   "decision_applied_at TIMESTAMP",
+  "payment_nudge_at TIMESTAMP",
   "freeze_until DATE",
   "never_again BOOL",
+  "new_hybrid_sales FLOAT64",
   "ig_handle STRING",
   "ig_url STRING",
   "ig_followers INT64",
@@ -146,25 +148,76 @@ function unionRef() {
 /**
  * Sheet-owned columns updated by sync.
  * Never overwrite: user_id, mt_*, discount_id,
- * promo_code, offer_link, decision*, never_again, promoted_at, onboarded_at, acceptance_emailed_at,
- * tiktok_*, other_channels (applicant/promote-owned), ig_url (applicant URL;
- * sheet sync only fills when empty), ig_followers
+ * promo_code, offer_link, decision*, never_again, new_hybrid_sales, promoted_at, onboarded_at, acceptance_emailed_at,
+ * payment_nudge_at, tiktok_*, other_channels (applicant/promote-owned), ig_url
+ * (derived from every parsed sheet handle; otherwise keep applicant URL), ig_followers
  * (onboard seed; live count is Modash on copilot_performance).
  * Membership / classes come from joins in copilot_performance — not sheet sync.
  */
-function normalizeIgSql(expr) {
+function splitIgHandlesSql(expr) {
   const { projectId, dataset } = getBqConfig();
-  return `\`${projectId}.${dataset}.normalize_ig_handle\`(${expr})`;
+  return `\`${projectId}.${dataset}.split_ig_handles\`(${expr})`;
 }
 
+/** "@name", or newline-separated "@a\\n@b" so each handle pastes as its own line. */
 function storedIgHandleSql(expr) {
-  const n = normalizeIgSql(expr);
-  return `IF(${n} IS NULL, NULL, CONCAT('@', ${n}))`;
+  const hs = splitIgHandlesSql(expr);
+  return `IF(
+    ARRAY_LENGTH(${hs}) > 0,
+    ARRAY_TO_STRING(
+      ARRAY(SELECT CONCAT('@', h) FROM UNNEST(${hs}) AS h),
+      '\\n'
+    ),
+    NULL
+  )`;
 }
 
+/** Newline-separated profile URLs, one per parsed handle. */
 function igUrlFromHandleSql(expr) {
-  const n = normalizeIgSql(expr);
-  return `IF(${n} IS NULL, NULL, CONCAT('https://www.instagram.com/', ${n}, '/'))`;
+  const hs = splitIgHandlesSql(expr);
+  return `NULLIF(
+    ARRAY_TO_STRING(
+      ARRAY(
+        SELECT CONCAT('https://www.instagram.com/', h, '/')
+        FROM UNNEST(${hs}) AS h
+      ),
+      '\\n'
+    ),
+    ''
+  )`;
+}
+
+function missingFromActiveTabsWhere(alias = "T") {
+  return `
+    LOWER(IFNULL(${alias}.status, '')) != 'inactive'
+    AND ${alias}.contact_email IS NOT NULL
+    AND TRIM(${alias}.contact_email) != ''
+    AND LOWER(${alias}.contact_email) NOT IN UNNEST(@active_emails)
+  `;
+}
+
+function activeEmailsQueryOptions(emails) {
+  return queryOptions({ active_emails: emails }, { active_emails: ["STRING"] });
+}
+
+/**
+ * Emails currently on a TO/NY active tab. Read-only against the Drive-linked
+ * union — do not correlate this into DML on copilot_db (Cloud Run hits
+ * "Permission denied while getting Drive credentials").
+ */
+export async function listActiveSheetEmails() {
+  const bigquery = getBigQueryClient();
+  const [rows] = await bigquery.query({
+    query: `
+      SELECT DISTINCT LOWER(email) AS email
+      FROM ${unionRef()}
+      WHERE LOWER(IFNULL(status, '')) = 'active'
+        AND email IS NOT NULL
+        AND TRIM(email) != ''
+    `,
+    ...queryOptions(),
+  });
+  return (rows || []).map((r) => r.email).filter(Boolean);
 }
 
 function sheetUpdateSet() {
@@ -188,8 +241,16 @@ function sheetUpdateSet() {
     S.status
   ),
   T.bb_link = S.brandbot_link,
-  T.ig_handle = ${storedIgHandleSql("S.social_handle")},
-  T.ig_url = COALESCE(NULLIF(TRIM(T.ig_url), ''), ${igUrlFromHandleSql("S.social_handle")}),
+  T.ig_handle = IF(
+    LOWER(IFNULL(T.status, '')) = 'active',
+    COALESCE(${storedIgHandleSql("S.social_handle")}, T.ig_handle),
+    T.ig_handle
+  ),
+  T.ig_url = IF(
+    LOWER(IFNULL(T.status, '')) = 'active',
+    COALESCE(${igUrlFromHandleSql("S.social_handle")}, T.ig_url),
+    T.ig_url
+  ),
   T.sheet_membership_expiry = S.sheet_membership_expiry,
   T.hybrid_sales = S.hybrid,
   T.bb_sales = S.bb_amount,
@@ -245,8 +306,166 @@ export async function previewSheetSync() {
     `,
     ...queryOptions(),
   });
+  const counts = rows[0] || { sheet_rows: 0, would_insert: 0, would_update: 0 };
+  const activeEmails = await listActiveSheetEmails();
+  let would_inactivate = 0;
+  if (activeEmails.length) {
+    const [inactiveRows] = await bigquery.query({
+      query: `
+        SELECT COUNT(*) AS n
+        FROM ${copilotRef} T
+        WHERE ${missingFromActiveTabsWhere("T")}
+      `,
+      ...activeEmailsQueryOptions(activeEmails),
+    });
+    would_inactivate = Number(inactiveRows[0]?.n ?? 0);
+  }
+  return { ...counts, would_inactivate };
+}
 
-  return rows[0] || { sheet_rows: 0, would_insert: 0, would_update: 0 };
+/**
+ * Active copilot_db emails that are not on any active TO/NY sheet tab.
+ */
+export async function listMissingFromActiveTabs({ limit = 0 } = {}) {
+  const bigquery = getBigQueryClient();
+  const copilotRef = copilotDbRef();
+  const activeEmails = await listActiveSheetEmails();
+  if (!activeEmails.length) return [];
+  const limitSql =
+    Number(limit) > 0 ? `LIMIT ${Number.parseInt(limit, 10)}` : "";
+  const [rows] = await bigquery.query({
+    query: `
+      SELECT
+        contact_email,
+        first_name,
+        last_name,
+        region,
+        tier,
+        status
+      FROM ${copilotRef} T
+      WHERE ${missingFromActiveTabsWhere("T")}
+      ORDER BY region, contact_email
+      ${limitSql}
+    `,
+    ...activeEmailsQueryOptions(activeEmails),
+  });
+  return rows || [];
+}
+
+/**
+ * Mark roster status inactive when the email is gone from every active tab.
+ * People still on an active tab stay active (even if they also appear on Inactive).
+ * Does not touch rows already inactive. Blank/null status is treated as
+ * not on the roster (same as active-but-removed).
+ * Active-tab emails are loaded first so the UPDATE does not read Drive.
+ */
+export async function inactivateMissingFromActiveTabs() {
+  const bigquery = getBigQueryClient();
+  const copilotRef = copilotDbRef();
+  const activeEmails = await listActiveSheetEmails();
+  if (!activeEmails.length) {
+    throw new Error(
+      "No active-tab emails from the ops sheets — refusing to inactivate"
+    );
+  }
+  const query = `
+    UPDATE ${copilotRef} T
+    SET
+      status = 'inactive',
+      updated_at = CURRENT_TIMESTAMP()
+    WHERE ${missingFromActiveTabsWhere("T")}
+  `;
+  const [job] = await bigquery.createQueryJob({
+    query,
+    ...activeEmailsQueryOptions(activeEmails),
+  });
+  await job.getQueryResults();
+  const meta = job.metadata?.statistics?.query;
+  return {
+    affected: Number(meta?.numDmlAffectedRows ?? 0),
+  };
+}
+
+function activeIgFromSheetSql() {
+  const newHandle = storedIgHandleSql("S.social_handle");
+  const newUrl = igUrlFromHandleSql("S.social_handle");
+  return {
+    newHandle,
+    newUrl,
+    fromWhere: `
+      FROM ${copilotDbRef()} AS T
+      JOIN ${unionRef()} AS S
+        ON LOWER(T.contact_email) = LOWER(S.email)
+      WHERE LOWER(IFNULL(T.status, '')) = 'active'
+        AND NULLIF(TRIM(S.social_handle), '') IS NOT NULL
+        AND ARRAY_LENGTH(${splitIgHandlesSql("S.social_handle")}) > 0
+    `,
+  };
+}
+
+/**
+ * Preview IG handle/URL updates from the ops sheets for copilots who are
+ * already status=active in copilot_db. Does not insert or inactivate anyone.
+ */
+export async function previewActiveIgFromSheets() {
+  const bigquery = getBigQueryClient();
+  const { newHandle, newUrl, fromWhere } = activeIgFromSheetSql();
+  const [rows] = await bigquery.query({
+    query: `
+      SELECT
+        T.contact_email,
+        T.region,
+        T.tier,
+        T.ig_handle AS db_ig_handle,
+        ${newHandle} AS sheet_ig_handle,
+        T.ig_url AS db_ig_url,
+        COALESCE(${newUrl}, T.ig_url) AS sheet_ig_url,
+        S.social_handle AS sheet_social_handle,
+        ARRAY_LENGTH(${splitIgHandlesSql("S.social_handle")}) AS handle_count
+      ${fromWhere}
+      ORDER BY
+        ARRAY_LENGTH(${splitIgHandlesSql("S.social_handle")}) DESC,
+        T.contact_email
+    `,
+    ...queryOptions(),
+  });
+  return rows || [];
+}
+
+/**
+ * Copy parsed ig_handle + ig_url from the ops sheets onto active copilot_db
+ * rows only. Leaves inactive/offboarded copilots untouched; does not MERGE
+ * other sheet columns or insert new emails.
+ */
+export async function syncActiveIgFromSheets() {
+  const bigquery = getBigQueryClient();
+  const copilotRef = copilotDbRef();
+  const source = unionRef();
+  const newHandle = storedIgHandleSql("S.social_handle");
+  const newUrl = igUrlFromHandleSql("S.social_handle");
+
+  const query = `
+    UPDATE ${copilotRef} AS T
+    SET
+      ig_handle = COALESCE(${newHandle}, T.ig_handle),
+      ig_url = COALESCE(${newUrl}, T.ig_url),
+      updated_at = CURRENT_TIMESTAMP()
+    FROM ${source} AS S
+    WHERE LOWER(T.contact_email) = LOWER(S.email)
+      AND LOWER(IFNULL(T.status, '')) = 'active'
+      AND NULLIF(TRIM(S.social_handle), '') IS NOT NULL
+      AND ARRAY_LENGTH(${splitIgHandlesSql("S.social_handle")}) > 0
+  `;
+
+  const [job] = await bigquery.createQueryJob({
+    query,
+    ...queryOptions(),
+  });
+  await job.getQueryResults();
+  const meta = job.metadata?.statistics?.query;
+  return {
+    affected: Number(meta?.numDmlAffectedRows ?? 0),
+  };
 }
 
 /**
@@ -415,8 +634,8 @@ export async function backfillSocialFromApplicants() {
 
 /**
  * Apply CREATE OR REPLACE VIEW/FUNCTION (and CREATE TABLE IF NOT EXISTS)
- * for union, dedup, Modash ingest, performance, evaluation_queue,
- * and add-to-modash.
+ * for union, dedup, split_ig_handles, Modash ingest, performance,
+ * evaluation_queue, and add-to-modash.
  * Replaces YOUR_PROJECT with configured project id.
  */
 export async function applySheetUnionViews() {
@@ -431,6 +650,7 @@ export async function applySheetUnionViews() {
 
   for (const file of [
     "normalize_ig_handle.sql",
+    "split_ig_handles.sql",
     "modash_creators.sql",
     "modash_content.sql",
     "raw_copilots_union.sql",

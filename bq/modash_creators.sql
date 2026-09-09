@@ -4,7 +4,7 @@
 -- Source file pattern:
 --   instagram-campaign-{slug}-creators-{YYYY-MM-DD}_to_{YYYY-MM-DD}.csv
 -- Parse window_start / window_end from the filename; campaign_name from the CSV.
--- Keep zero-count creators — those show modash_posts = 0.
+-- Keep zero-count creators.
 --
 -- MERGE example:
 --   MERGE `YOUR_PROJECT.copilots.modash_creators` T

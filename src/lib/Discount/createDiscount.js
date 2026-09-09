@@ -104,6 +104,19 @@ export async function createCopilotDiscount(
     throw error;
   }
 }
+
+/** True when Mariana Tek rejected the voucher because the code is already in use. */
+export function isDuplicatePromoCodeError(error) {
+  const status = error?.response?.status;
+  if (status && ![400, 409, 422].includes(status)) return false;
+  const blob = JSON.stringify(error?.response?.data ?? error.message ?? "").toLowerCase();
+  if (!blob) return false;
+  return (
+    /(already|exist|unique|taken|duplicate|in use)/.test(blob) &&
+    /code/.test(blob)
+  );
+}
+
 //-----Testing the createCopilotDiscount function-----
 // createCopilotDiscount("Kathryn", "Doe", "KATHRYNSAUSER", "Seeker")
 //   .then((id) => {

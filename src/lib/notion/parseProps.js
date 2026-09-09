@@ -69,34 +69,50 @@ export function splitName(fullName) {
   };
 }
 
+function tokenizeName(value) {
+  return String(value || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/** Drop consecutive duplicate tokens, case-insensitive ("Nguien Nguien" → "Nguien").
+ * Keep the later spelling so "chandran" + "Chandran" becomes "Chandran".
+ */
+function collapseConsecutiveNameTokens(parts) {
+  const out = [];
+  for (const part of parts) {
+    const prev = out[out.length - 1];
+    if (prev && prev.toLowerCase() === part.toLowerCase()) {
+      out[out.length - 1] = part;
+      continue;
+    }
+    out.push(part);
+  }
+  return out;
+}
+
+/**
+ * Collapse duplicated first/last tokens from Notion ("Marie" + "Nguien Nguien Nguien"
+ * → Marie / Nguien). First name is the first token; the rest is last name.
+ */
+export function normalizePersonName(firstName, lastName) {
+  const all = collapseConsecutiveNameTokens([
+    ...tokenizeName(firstName),
+    ...tokenizeName(lastName),
+  ]);
+  if (!all.length) return { firstName: "", lastName: "" };
+  if (all.length === 1) return { firstName: all[0], lastName: "" };
+  return { firstName: all[0], lastName: all.slice(1).join(" ") };
+}
+
 /**
  * Build a page title from first + last without stacking last name
  * ("Jane Smith" + "Smith" → "Jane Smith", not "Jane Smith Smith").
  */
 export function composeDisplayName(firstName, lastName) {
-  const first = String(firstName || "").trim();
-  const last = String(lastName || "").trim();
-  let combined;
-  if (!first) combined = last;
-  else if (!last) combined = first;
-  else if (first === last) combined = first;
-  else if (first.endsWith(` ${last}`)) combined = first;
-  else combined = `${first} ${last}`;
-  return collapseRepeatedTrailingWord(combined);
-}
-
-/** "Jane Smith Smith Smith" → "Jane Smith" */
-function collapseRepeatedTrailingWord(name) {
-  const parts = String(name || "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (parts.length < 3) return parts.join(" ");
-  const last = parts[parts.length - 1];
-  while (parts.length >= 3 && parts[parts.length - 2] === last) {
-    parts.pop();
-  }
-  return parts.join(" ");
+  const n = normalizePersonName(firstName, lastName);
+  return [n.firstName, n.lastName].filter(Boolean).join(" ");
 }
 
 export function getUrl(props, name) {
