@@ -120,6 +120,11 @@ export async function updateCopilotByEmail(email, fields) {
     promo_code: "STRING",
     discount_id: "STRING",
     offer_link: "STRING",
+    first_name: "STRING",
+    last_name: "STRING",
+    contact_email: "STRING",
+    ig_handle: "STRING",
+    ig_url: "STRING",
     tier: "STRING",
     user_id: "STRING",
     mt_email: "STRING",
@@ -233,8 +238,10 @@ export async function listEvaluationQueue() {
         region,
         tier,
         user_id,
+        mt_email,
         membership_status,
         promo_code_status,
+        promo_code,
         ig_handle,
         ig_url,
         ig_followers,
@@ -382,6 +389,97 @@ export async function listCopilotsByEmails(emails) {
   return (rows || []).map(normalizeCopilotRow);
 }
 
+/**
+ * Active copilots with a live Co-Pilot membership whose IG is the ops
+ * "re-submit" placeholder (same flag as Review: need to resubmit social handles).
+ * Live = membership name matches co-pilot and status is active / pending /
+ * payment_failure (frozen / ended / cancelled stay out).
+ * Queries copilot_db + mt_membership_instances directly so it does not
+ * depend on copilot_performance (stg_mt_discounts).
+ */
+export async function listActiveResubmitHandleCopilots() {
+  const bigquery = getBigQueryClient();
+  const [rows] = await bigquery.query({
+    query: `
+      WITH queued AS (
+        SELECT
+          contact_email,
+          first_name,
+          last_name,
+          region,
+          tier,
+          mt_email,
+          ig_handle,
+          ig_url,
+          tiktok_handle,
+          decision_notes,
+          CAST(user_id AS STRING) AS user_id
+        FROM ${copilotDbRef()}
+        WHERE LOWER(IFNULL(status, '')) = 'active'
+          AND contact_email IS NOT NULL
+          AND TRIM(contact_email) != ''
+          AND REGEXP_CONTAINS(
+            LOWER(CONCAT(IFNULL(ig_handle, ''), ' ', IFNULL(ig_url, ''))),
+            r're-?submit'
+          )
+      ),
+      live AS (
+        SELECT * EXCEPT (rn) FROM (
+          SELECT
+            CAST(user_id AS STRING) AS user_id,
+            membership_name,
+            status AS membership_status,
+            COALESCE(
+              DATE(calculated_end_at, 'America/New_York'),
+              DATE(scheduled_end_at, 'America/New_York'),
+              end_date,
+              DATE(cancelled_at, 'America/New_York')
+            ) AS membership_end,
+            ROW_NUMBER() OVER (
+              PARTITION BY CAST(user_id AS STRING)
+              ORDER BY started_at DESC NULLS LAST
+            ) AS rn
+          FROM \`data-pipeline-492715.core.mt_membership_instances\`
+          WHERE user_id IS NOT NULL
+            AND TRIM(CAST(user_id AS STRING)) != ''
+            AND REGEXP_CONTAINS(
+              LOWER(IFNULL(membership_name, '')),
+              r'co[\\s-]?pilot'
+            )
+            AND LOWER(IFNULL(status, '')) IN (
+              'active', 'pending', 'payment_failure'
+            )
+        )
+        WHERE rn = 1
+      )
+      SELECT
+        q.contact_email,
+        q.first_name,
+        q.last_name,
+        q.region,
+        q.tier,
+        q.mt_email,
+        q.ig_handle,
+        q.ig_url,
+        q.tiktok_handle,
+        q.decision_notes,
+        m.membership_name,
+        m.membership_status,
+        m.membership_end
+      FROM queued AS q
+      INNER JOIN live AS m
+        ON m.user_id = q.user_id
+      ORDER BY
+        q.region ASC NULLS LAST,
+        q.last_name ASC NULLS LAST,
+        q.first_name ASC NULLS LAST,
+        q.contact_email
+    `,
+    ...queryOptions(),
+  });
+  return rows || [];
+}
+
 /** Cycle stats for lifecycle emails (from copilot_performance, not copilot_db). */
 export async function getCopilotCycleStats(email) {
   const key = emailKey(email);
@@ -427,7 +525,7 @@ export async function listUnappliedDecisions() {
       FROM ${copilotDbRef()}
       WHERE LOWER(IFNULL(decision, '')) IN (
           'onboard', 'renew', 'offboard', 'never again', 'never_again',
-          'upgrade', 'downgrade', 'snooze', 'freeze'
+          'upgrade', 'downgrade', 'snooze', 'freeze', 'update', 'social'
         )
         AND decision_applied_at IS NULL
         AND contact_email IS NOT NULL

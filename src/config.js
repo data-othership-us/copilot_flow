@@ -177,7 +177,7 @@ export const config = {
   /** Min scraped followers for 🟢 / 🟡 / 🔴 page icons */
   qualifiedMinFollowers: envInt("QUALIFIED_MIN_FOLLOWERS", 1500),
 
-  /** Days between onboarding nudges (Accepted applicants) and Review-tab payment-method nudges */
+  /** Days between Review-tab payment-method nudges (onboard / renew / upgrade / downgrade) */
   nudgeCooldownDays: envInt("NUDGE_COOLDOWN_DAYS", 3),
   /**
    * Only inspect Onboarded cards edited in this many days when moving
@@ -188,7 +188,7 @@ export const config = {
   /**
    * Gmail API — Co-Pilot mailbox.
    * Applications label: rejection + onboarding nudge.
-   * Management label: Review lifecycle (renew / offboard / upgrade / downgrade / freeze / payment nudge).
+   * Management label: Review lifecycle (renew / offboard / upgrade / downgrade / freeze / payment nudge / resubmit handles).
    * Auth a separate Google account via: npm run gmail-oauth
    */
   email: {

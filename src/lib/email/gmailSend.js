@@ -20,6 +20,7 @@ const MANAGEMENT_EMAIL_KINDS = new Set([
   "copilot_downgrade",
   "copilot_freeze",
   "copilot_payment_nudge",
+  "copilot_resubmit_handles",
 ]);
 
 export function getEmailSendMethod() {

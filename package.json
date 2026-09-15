@@ -17,6 +17,7 @@
     "create-discounts-from-list": "node src/scripts/createDiscountsFromList.js",
     "update-discounts": "node src/lib/Discount/updateDiscounts.js",
     "find-discount-ids": "node src/scripts/findDiscountIds.js",
+    "backfill-promo-codes": "node src/scripts/backfillPromoCodes.js",
     "find-user-ids": "node src/lib/Account/findUserID.js",
     "find-memberships": "node src/lib/Membership/findMembership.js",
     "backfill-memberships": "node src/scripts/backfillMembershipsFromPipeline.js",
@@ -24,7 +25,8 @@
     "update-memberships": "node src/scripts/updateMemberships.js",
     "assign-memberships": "node src/scripts/assignMembershipsToUsers.js",
     "find-reservations": "node src/scripts/findReservations.js",
-    "apply-offboard-credits": "node src/scripts/applyOffboardCredits.js"
+    "apply-offboard-credits": "node src/scripts/applyOffboardCredits.js",
+    "email-resubmit-handles": "node src/scripts/emailResubmitHandles.js"
   },
   "engines": {
     "node": ">=20"

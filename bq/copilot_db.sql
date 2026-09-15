@@ -24,10 +24,10 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.copilots.copilot_db` (
   tiktok_followers INT64,
   other_channels JSON,       -- youtube / linkedin / twitter / blog / …
   discount_id STRING,         -- MT discount id (system-owned)
-  -- percentage FLOAT64 — legacy; unused (join discount_codes if needed)
+  -- percentage FLOAT64 — legacy; unused (join stg_mt_discounts if needed)
   offer_link STRING,          -- New special-offer URL (system-owned)
   status STRING,              -- active | inactive (ops sheet tabs)
-  decision STRING,            -- onboard | renew | offboard | never again | upgrade | downgrade | snooze | freeze
+  decision STRING,            -- onboard | renew | offboard | never again | upgrade | downgrade | snooze | freeze | update | social
   decision_notes STRING,
   decision_at TIMESTAMP,
   decision_source STRING,     -- e.g. evaluation_sheet | manual

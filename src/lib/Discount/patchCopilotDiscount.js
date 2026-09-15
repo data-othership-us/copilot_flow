@@ -93,7 +93,7 @@ async function resolveDiscountId({
     const byCode = await lookupDiscountIdByPromoCode(promoCode);
     if (byCode) return byCode;
   } catch (error) {
-    console.warn(`   ⚠️  discount_codes lookup failed: ${error.message}`);
+    console.warn(`   ⚠️  stg_mt_discounts lookup failed: ${error.message}`);
   }
   try {
     const existing = await findExistingCopilotPromo({

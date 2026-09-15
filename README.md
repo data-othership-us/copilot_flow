@@ -57,7 +57,7 @@ Schedule on **Cloud Run Jobs** + **Cloud Scheduler** (once daily).
 
 Daily job over `copilot_db` rows with `promoted_at` and no `onboarded_at`:
 
-1. Look up a live Co-Pilot membership on their MT account, and an existing promo that belongs to **this person** (`copilot_db.promo_code` / `discount_id`, or an unowned `discount_codes` match — `FIRSTNAMELASTNAME` / `Seeker First Last`). A code already assigned to another copilot is not reused. If both their promo and a live membership exist, stamp Onboarded and skip a new membership / email (manual onboards). Inactive vouchers are turned back on.
+1. Look up a live Co-Pilot membership on their MT account, and an existing promo that belongs to **this person** (`copilot_db.promo_code` / `discount_id`, or an unowned `stg_mt.stg_mt_discounts` match — `FIRSTNAMELASTNAME` / `Seeker First Last`). A code already assigned to another copilot is not reused. If both their promo and a live membership exist, stamp Onboarded and skip a new membership / email (manual onboards). Inactive vouchers are turned back on.
 2. Otherwise generate `promo_code` (FIRSTNAMELASTNAME). If that name is already taken in copilot_db or Mariana Tek, use their Instagram handle with symbols stripped (`@jane.smith` → `JANESMITH`). If the handle is missing or also taken, fall back to the email local-part.
 3. Create the MT discount (region-correct products), or reactivate their existing voucher. If Mariana Tek rejects the code as already in use, mint the next unique code and retry.
 4. Write `offer_link` = `https://othership.us/copilot/intro-offer?id={promo_code}`
@@ -75,7 +75,7 @@ Deploy: `./deploy/deploy-onboard-job.sh` (9:15am ET, after evaluate-applications
 
 ## Evaluation + decisions (Christine sheet)
 
-Named view `copilot_evaluation_queue` (on `copilot_performance`): active copilots who have an MT `user_id` and a **Co-Pilot** membership whose performance-view **`days_to_expiry`** is within **7 days** or already expired, **or** whose `ig_handle` contains **re-submit**, **or** who have **no Mariana Tek `user_id`**. `membership_end` / `days_to_expiry` come from `copilot_performance` (Mariana Tek instance end). Other rows with no Co-Pilot membership stay off Review unless they match re-submit / no `user_id`. Rebuild stamps `need to resubmit social handles` or `No MT account found` on those rows (keeps any notes already filled). The job rebuilds the Review tab from that queue. She picks `decision` from a dropdown (`onboard` / `renew` / `offboard` / `never again` / `upgrade` / `downgrade` / `snooze` / `freeze`). Then the job writes `decision*` to `copilot_db` and applies.
+Named view `copilot_evaluation_queue` (on `copilot_performance`): active copilots who have an MT `user_id` and a **Co-Pilot** membership whose performance-view **`days_to_expiry`** is within **7 days** or already expired, **or** whose `ig_handle` contains **re-submit**, **or** who have **no Mariana Tek `user_id`**. `membership_end` / `days_to_expiry` come from `copilot_performance` (Mariana Tek instance end). Other rows with no Co-Pilot membership stay off Review unless they match re-submit / no `user_id`. Rebuild stamps `need to resubmit social handles` or `No MT account found` on those rows (keeps any notes already filled). The job rebuilds the Review tab from that queue. She picks `decision` from a dropdown (`onboard` / `renew` / `offboard` / `never again` / `upgrade` / `downgrade` / `snooze` / `freeze` / `update` / `social`). Then the job writes `decision*` to `copilot_db` and applies.
 
 Apply is idempotent: if a crash happened after assigning a new term but before `decision_applied_at`, the next run will not assign a duplicate. After the Mariana Tek change, the job **sends a placeholder email** to the copilot (swap templates later). If Gmail is not configured, apply fails and the Review row stays for retry. **Renew / upgrade / downgrade / offboard / never again** stay on Review until the last day (`days_to_expiry <= 0`) **while they are still in the 7-day queue**; the filled **decision** is kept across those rebuilds (and restored from copilot_db if the sheet cell is blank) until apply. Someone with a live Co-Pilot term more than 7 days out is not queued and is dropped from Review, unless their `ig_handle` contains **re-submit** or they have **no MT `user_id`**. Those rows stay on Review until the handle is a real username, they get a `user_id`, or ops marks them inactive. Offboard then expires the promo, sends email, and sets `status=inactive`. Renew / upgrade / downgrade leave the live membership in place and assign a new term **starting now** (no delayed start). If the live term still has more than a day left, apply waits. Hub / Notion access removal is out of scope.
 
@@ -91,8 +91,9 @@ If **onboard / renew / upgrade / downgrade** cannot add the new membership becau
 - **downgrade** — same last-day apply as renew; one step Luminary → Wayfinder → Seeker; new-tier (shorter) membership starting now + patch discount %; send downgrade email; Seeker + downgrade **fails** so she can pick offboard
 - **snooze** — no MT change, no email (review hold only); hide from Review for **3 months** after `decision_at`, then re-queue if still in the window
 - **freeze** — freeze the live Co-Pilot membership until `freeze_until`, or **3 months** if blank; send freeze email; persist `freeze_until` on `copilot_db`; hide while `membership_status` is frozen or until that date
+- **social** — send the resubmit-handles email (`emails/resubmitHandles.html`) immediately (no last-day wait, no `user_id` required). Stamp Review `decision_notes` to `resubmit handles email sent YYYY-MM-DD` and **leave the Review row** until the handle is a real public username. Does not re-send if that note is already present. Does not set `decision_applied_at`, so she can still pick renew / offboard / etc. afterward.
 
-After apply, the Review row is deleted. People come back when:
+After apply, the Review row is deleted (except **social**, which stays, and payment-method / last-day holds). People come back when:
 
 - **onboard / renew / upgrade / downgrade** — a new `membership_start` is on/after `decision_applied_at` and that term is again within 7 days of ending
 - **snooze** — 3 months after `decision_at` and still expiring with a Co-Pilot membership
@@ -147,14 +148,14 @@ npm run sync-copilot-db                 # full sync
 npm run sync-copilot-db -- --skip-views # MERGE only (views already applied)
 ```
 
-Deploy: `./deploy/deploy-sync-copilot-db-job.sh` (**8:45am ET**, before evaluate-applications). The Cloud Run service account must be able to query the Drive-linked `raw_*` tables (share the TO/NY sheets with that SA).
+Deploy: `./deploy/deploy-sync-copilot-db-job.sh` (**8:45am ET**, before evaluate-applications). The Cloud Run service account must be able to query the Drive-linked `raw_*` tables (share the TO/NY sheets with that SA) and **BigQuery Data Viewer** on `data-pipeline-492715.stg_mt` (live MT discounts for onboard / find-discount-ids / `copilot_performance`).
 
 ### Column ownership on `copilot_db`
 
 | Owner          | Columns                                                                                                                                                                                                                | Who writes                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Ops sheet**  | names, region, tier, **`status`**, bb_link, **`ig_handle`** (`@handle` or `@a, @b`), **sales fields**, **`sheet_membership_expiry`**, ops tracking (`renewal_amt`, `modash`, `in_hub`, …), notes                       | `sync-copilot-db` — does not overwrite `status` after an applied **offboard** / **never again**, or `tier` after an applied **upgrade** / **downgrade**. After MERGE, sets **`status=inactive`** for emails not on any active tab. Does not overwrite **`ig_followers`** (Modash is live; DB value is onboard seed only). Canonicalizes `ig_handle` (splits several accounts in one sheet cell); rebuilds **`ig_url`** as one profile link per handle. |
-| **System**     | `user_id`, `mt_email`, `mt_profile_link`, `discount_id`, **`promo_code`**, **`offer_link`**, `promoted_at`, `onboarded_at`, `acceptance_emailed_at`, **`tiktok_handle`**, **`tiktok_followers`**, **`other_channels`** | MT / promote / enrich jobs — **never overwritten by ops sheet sync**. Empty `ig_url` is kept when the sheet has no handle.                                                                                                                                                                                                                                                                                                                             |
+| **System**     | `user_id`, `mt_email`, `mt_profile_link`, `discount_id`, **`promo_code`**, **`offer_link`**, `promoted_at`, `onboarded_at`, `acceptance_emailed_at`, **`tiktok_handle`**, **`tiktok_followers`**, **`other_channels`** | MT / promote / enrich jobs — **never overwritten by ops sheet sync**. Empty `ig_url` is kept when the sheet has no handle. The performance view overlays the current MT code string by `discount_id` from `stg_mt.stg_mt_discounts`.                                                                                                                                                                                                                                                |
 | **Evaluation** | `decision`, `decision_notes`, `decision_at`, `decision_source`, `decision_applied_at`, **`payment_nudge_at`**, **`freeze_until`**, **`never_again`**, **`new_hybrid_sales`**                                           | Evaluation Sheet → DB — **never ops sheet sync**                                                                                                                                                                                                                                                                                                                                                                                                       |
 | **Computed**   | membership (instances join), **`home_studio`** (MT user home location), classes / last class, promo redemptions, **`modash_posts`**, **`ig_followers`** (Modash, else copilot_db seed)                                 | View `copilot_performance`. Slack bot writes `modash_creators` + `modash_content`.                                                                                                                                                                                                                                                                                                                                                                     |
 
@@ -165,9 +166,9 @@ Dedup: one row per email; prefer **`active` over `inactive`**, then `ORDER BY ti
 | npm script                     | What it does                                                                                                       |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
 | `npm run onboard-copilots`     | Promote handoff → discount, offer_link, membership, acceptance email, Onboarded                                    |
-| `npm run evaluate-copilots`    | Queue view → Review sheet → apply onboard / renew / offboard / never again / upgrade / downgrade / snooze / freeze |
+| `npm run evaluate-copilots`    | Queue view → Review sheet → apply onboard / renew / offboard / never again / upgrade / downgrade / snooze / freeze / update / social |
 | `npm run sync-copilot-db`      | Migrate columns, refresh views, MERGE sheet → `copilot_db`, inactivate emails not on an active tab                 |
-| `npm run find-discount-ids`    | Lookup existing discount ids from `discount_codes` + set `offer_link` (no create)                                  |
+| `npm run find-discount-ids`    | Lookup existing discount ids from `stg_mt.stg_mt_discounts` + set `offer_link` (no create)                          |
 | `npm run create-discounts`     | **Onboarding only** — create MT discounts for rows with `promo_code` but no `discount_id`                          |
 | `npm run update-discounts`     | Sync existing discounts in MT from BQ                                                                              |
 | `npm run find-user-ids`        | Backfill `user_id` / `mt_email` in `copilot_db` from MT                                                            |
@@ -177,6 +178,18 @@ Dedup: one row per email; prefer **`active` over `inactive`**, then `ORDER BY ti
 | `npm run update-memberships`   | End legacy co-pilot memberships listed in `copilot_memberships`                                                    |
 | `npm run assign-memberships`   | Assign Seeker co-pilot memberships by email list                                                                   |
 | `npm run find-reservations`    | Report future reservations for terminating memberships                                                             |
+| `npm run email-resubmit-handles` | One-time: email active copilots with a live Co-Pilot membership whose IG is **re-submit**                        |
+
+### Resubmit social handles (one-time)
+
+Emails every **active** copilot who has a **live Co-Pilot membership** (`active` / `pending` / `payment_failure`) and whose `ig_handle` is the ops placeholder **re-submit** (same flag Review stamps as `need to resubmit social handles`). Asks them to reply with a public Instagram handle, plus TikTok if they have one. After a successful send, Review `decision_notes` (and `copilot_db`) become `resubmit handles email sent YYYY-MM-DD` in place of the original resubmit flag.
+
+```bash
+DRY_RUN=1 npm run email-resubmit-handles
+EMAILS=a@example.com DRY_RUN=1 npm run email-resubmit-handles
+LIMIT=5 DRY_RUN=1 npm run email-resubmit-handles
+DRY_RUN=0 npm run email-resubmit-handles -- --apply
+```
 
 ## Env
 

@@ -39,6 +39,7 @@ import {
   partitionNewestByEmail,
   markDuplicateApplication,
   markOlderDuplicatesForEmail,
+  markExtraApplicationsWhenOnboardedExists,
   setApplicationStatus,
   addApplicationComment,
   writeEnrichmentToNotion,
@@ -63,22 +64,45 @@ import { findExistingCopilotPromo } from "../lib/onboard/existingPromo.js";
 import {
   holdIfPreviouslyOffboarded,
   isNeverAgain,
+  isCopilotDbActive,
   prepareCopilotForReonboard,
   refuseNeverAgainApplication,
   resolveNeedsReview,
+  stampOnboardedForActiveCopilot,
 } from "../lib/onboard/priorOffboard.js";
 
 /**
- * Skip sending another nudge while Last Nudged is within NUDGE_COOLDOWN_DAYS.
+ * Onboarding nudge is once: if Last Nudged is set, never send again.
  * Needs Nudge is an ops flag, not proof an email went out.
  */
-function isNudgeOnCooldown(app) {
+function hasOnboardingNudgeBeenSent(app) {
   const raw = app?.lastNudged;
   if (!raw) return false;
   const last = new Date(raw);
-  if (Number.isNaN(last.getTime())) return false;
-  const days = Number(config.nudgeCooldownDays) || 3;
-  return Date.now() - last.getTime() < days * 24 * 60 * 60 * 1000;
+  return !Number.isNaN(last.getTime());
+}
+
+/**
+ * Active roster + an Onboarded card already exists: extra applications
+ * (No Status / Evaluated / Accepted) → Duplicate. Returns true when
+ * `app` itself was marked.
+ */
+async function duplicateExtrasIfActiveCopilot(app, copilot, summary) {
+  if (!app?.email || !isCopilotDbActive(copilot)) return false;
+  const extraIds = await markExtraApplicationsWhenOnboardedExists(app.email, {
+    dryRun: config.dryRun,
+  });
+  if (!extraIds.length) return false;
+  summary.duplicatesRejected += extraIds.length;
+  if (!config.dryRun) {
+    for (const pageId of extraIds) {
+      await syncApplicantStatusFromNotion({
+        notionPageId: pageId,
+        notionStatus: config.notion.status.duplicate,
+      });
+    }
+  }
+  return extraIds.includes(app.notionPageId);
 }
 
 /** True when copilot_db already has a promo code or an MT identity. */
@@ -198,7 +222,11 @@ async function stampOnboardedIfAlreadyProvisioned(app, email, userId, mt = null)
     );
     return false;
   }
-  if (copilot?.onboarded_at) return true;
+
+  const notionOnboarded =
+    String(app.status || "").toLowerCase() ===
+    String(config.notion.status.onboarded || "").toLowerCase();
+  if (copilot?.onboarded_at && notionOnboarded) return true;
 
   if (config.dryRun) {
     console.log(
@@ -232,10 +260,10 @@ async function stampOnboardedIfAlreadyProvisioned(app, email, userId, mt = null)
 
   const offerLink = buildOfferLink(promo);
   const patch = {
-    onboarded_at: "NOW",
     promoted_at: "NOW",
     promo_code: promo,
   };
+  if (!copilot?.onboarded_at) patch.onboarded_at = "NOW";
   if (existingPromo.discountId) patch.discount_id = existingPromo.discountId;
   if (offerLink && !String(copilot?.offer_link || "").trim()) {
     patch.offer_link = offerLink;
@@ -613,6 +641,20 @@ async function processNewApplications(summary) {
   for (const app of applications) {
     console.log(`\n—— ${app.fullName || app.email || app.notionPageId} ——`);
 
+    let copilot = null;
+    if (app.email) {
+      try {
+        copilot = await getCopilotByEmail(app.email);
+      } catch (error) {
+        console.warn(`   ⚠️  copilot_db lookup failed: ${error.message}`);
+      }
+    }
+
+    if (await duplicateExtrasIfActiveCopilot(app, copilot, summary)) {
+      console.log("   ⏭️  Already an active Co-Pilot — extra card → Duplicate");
+      continue;
+    }
+
     const olderDupes = await markOlderDuplicatesForEmail(app);
     summary.duplicatesRejected += olderDupes.length;
     if (olderDupes.length > 0) {
@@ -650,14 +692,6 @@ async function processNewApplications(summary) {
       console.log("   ↩️  Previous application detected for this email");
     }
 
-    let copilot = null;
-    if (app.email) {
-      try {
-        copilot = await getCopilotByEmail(app.email);
-      } catch (error) {
-        console.warn(`   ⚠️  copilot_db lookup failed: ${error.message}`);
-      }
-    }
     const banned = isNeverAgain(copilot);
 
     await enrichOneApplication(app, socialByHandle, summary, {
@@ -791,9 +825,11 @@ async function processReevaluateEvaluated(summary) {
 
 /**
  * Pass 2: Notion "Accepted"
+ * - Extra card while already Onboarded + active in copilot_db → Duplicate
+ * - Live Co-Pilot membership (including historical accepted_before) → Status=Onboarded
  * - Re-onboard=Needs review + inactive/missing roster → Status=Evaluated
  * - Re-onboard=Needs review + already active in copilot_db → Status=Onboarded
- * - Missing MT account or CC → nudge (cooldown) and skip promote/onboard
+ * - Missing MT account or CC → nudge once, then skip promote/onboard
  * - Ready → clear nudge flags and promote to copilot_db
  */
 async function processAcceptedApplications(summary) {
@@ -803,15 +839,6 @@ async function processAcceptedApplications(summary) {
 
   for (const app of applications) {
     console.log(`\n—— Accepted: ${app.fullName || app.email || app.notionPageId} ——`);
-
-    const eligible = await isAcceptedActionEligible(app.notionPageId);
-    if (!eligible) {
-      console.log(
-        "   ⏭️  Pre-pipeline / accepted_before — skip nudge & promote (cutoff)"
-      );
-      summary.acceptedCutoffSkipped++;
-      continue;
-    }
 
     if (!app.email) {
       console.log("   ⚠️  No email — cannot check MT / promote");
@@ -824,6 +851,48 @@ async function processAcceptedApplications(summary) {
       copilot = await getCopilotByEmail(app.email);
     } catch (error) {
       console.warn(`   ⚠️  copilot_db lookup failed: ${error.message}`);
+    }
+
+    if (await duplicateExtrasIfActiveCopilot(app, copilot, summary)) {
+      console.log("   ⏭️  Already an active Co-Pilot — extra card → Duplicate");
+      continue;
+    }
+
+    let mt = null;
+    let userId = String(copilot?.user_id || "").trim();
+    if (!userId) {
+      mt = await enrichApplicantFromMt(app.email);
+      await sleep(config.requestDelayMs);
+      userId = String(mt.mtUserId || "").trim();
+      console.log(
+        `   MT: account=${mt.mtAccountExists} user=${mt.mtUserId ?? "—"} cc=${mt.mtHasCc === null ? "?" : mt.mtHasCc} studio=${mt.mtHomeStudio ?? "?"}`
+      );
+    }
+
+    if (userId && !isNeverAgain(copilot)) {
+      const live = await findLiveCopilotMembership(userId);
+      if (live) {
+        const membershipName =
+          live.attributes?.membership_name || live.id || "Co-Pilot";
+        console.log(`   🎫 live membership: ${membershipName}`);
+        await stampOnboardedForActiveCopilot(app, copilot, {
+          dryRun: config.dryRun,
+          email: app.email,
+          reason: "has a live Co-Pilot membership",
+        });
+        await duplicateExtrasIfActiveCopilot(app, copilot, summary);
+        summary.acceptedActiveOnboarded++;
+        continue;
+      }
+    }
+
+    const eligible = await isAcceptedActionEligible(app.notionPageId);
+    if (!eligible) {
+      console.log(
+        "   ⏭️  Pre-pipeline / accepted_before — skip nudge & promote (cutoff)"
+      );
+      summary.acceptedCutoffSkipped++;
+      continue;
     }
 
     const needsReviewAction = await resolveNeedsReview(app, copilot, {
@@ -839,11 +908,13 @@ async function processAcceptedApplications(summary) {
       continue;
     }
 
-    const mt = await enrichApplicantFromMt(app.email);
-    await sleep(config.requestDelayMs);
-    console.log(
-      `   MT: account=${mt.mtAccountExists} user=${mt.mtUserId ?? "—"} cc=${mt.mtHasCc === null ? "?" : mt.mtHasCc} studio=${mt.mtHomeStudio ?? "?"}`
-    );
+    if (!mt) {
+      mt = await enrichApplicantFromMt(app.email);
+      await sleep(config.requestDelayMs);
+      console.log(
+        `   MT: account=${mt.mtAccountExists} user=${mt.mtUserId ?? "—"} cc=${mt.mtHasCc === null ? "?" : mt.mtHasCc} studio=${mt.mtHomeStudio ?? "?"}`
+      );
+    }
 
     const hold = await holdIfPreviouslyOffboarded(app, copilot, {
       dryRun: config.dryRun,
@@ -872,11 +943,9 @@ async function processAcceptedApplications(summary) {
       const reason = formatNudgeReason(blockers);
       console.log(`   🚧 Blocked from onboard: ${reason}`);
 
-      if (isNudgeOnCooldown(app)) {
-        const days = Number(config.nudgeCooldownDays) || 3;
+      if (hasOnboardingNudgeBeenSent(app)) {
         console.log(
-          `   ⏭️  Nudge cooldown (${days}d)` +
-            `${app.lastNudged ? ` — last sent ${app.lastNudged}` : ""} — refresh MT only`
+          `   ⏭️  Already nudged${app.lastNudged ? ` (${app.lastNudged})` : ""} — refresh MT only`
         );
         if (!config.dryRun) {
           await writeOnboardingNudgeToNotion(app.notionPageId, {
@@ -1232,6 +1301,7 @@ export async function evaluateApplications() {
     acceptedSkipped: 0,
     acceptedFailed: 0,
     acceptedCutoffSkipped: 0,
+    acceptedActiveOnboarded: 0,
     acceptedReonboardHold: 0,
     acceptedReonboardOnboarded: 0,
     acceptedReonboardDeclined: 0,
@@ -1328,7 +1398,7 @@ export async function evaluateApplications() {
   console.log(`   Promoted to copilot_db: ${summary.acceptedPromoted}`);
   console.log(`   Nudged (missing MT/CC): ${summary.acceptedNudged}`);
   console.log(
-    `   Nudge skipped (cooldown): ${summary.acceptedNudgeSkipped}`
+    `   Nudge skipped (already sent): ${summary.acceptedNudgeSkipped}`
   );
   if (summary.acceptedNudgeFailed) {
     console.log(`   Nudge email not sent (will retry): ${summary.acceptedNudgeFailed}`);
@@ -1338,6 +1408,11 @@ export async function evaluateApplications() {
   console.log(
     `   Accepted cutoff skipped (historical): ${summary.acceptedCutoffSkipped}`
   );
+  if (summary.acceptedActiveOnboarded) {
+    console.log(
+      `   Live Co-Pilot membership — Notion Onboarded: ${summary.acceptedActiveOnboarded}`
+    );
+  }
   if (summary.acceptedReonboardHold) {
     console.log(
       `   Previously offboarded — moved to Evaluated (Needs review): ${summary.acceptedReonboardHold}`

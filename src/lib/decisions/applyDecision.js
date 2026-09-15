@@ -24,20 +24,30 @@ import {
   parseFreezeUntil,
   patchReviewDecisionNotes,
   withPaymentNudgeNote,
+  withResubmitHandlesEmailedNote,
+  RESUBMIT_HANDLES_EMAILED_NOTE,
 } from "../sheets/evaluationSheet.js";
-import { updateCopilotByEmail, getCopilotCycleStats } from "../bq/copilotOps.js";
+import { updateCopilotByEmail, getCopilotByEmail, getCopilotCycleStats } from "../bq/copilotOps.js";
 import {
   assertValidPaymentMethod,
   isPaymentMethodError,
 } from "../mt/bankcards.js";
+import { igProfileUrl, storedIgHandle } from "../instagram.js";
+import { buildOfferLink } from "../offerLink.js";
+import { listTakenPromoCodes } from "../onboard/existingPromo.js";
 import { config } from "../../config.js";
 import {
   isPaymentNudgeOnCooldown,
   sendPaymentMethodNudge,
   coerceTimestamp,
 } from "../nudge/paymentMethodNudge.js";
+import { sendResubmitHandlesEmail } from "../email/resubmitHandlesEmail.js";
 
 export { isPaymentNudgeHold } from "../nudge/paymentMethodNudge.js";
+
+export function isSocialNudgeHold(result) {
+  return String(result || "").startsWith("nudged_social");
+}
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -527,7 +537,165 @@ async function applyFreeze(row, { dryRun, freezeUntil }) {
   return "frozen";
 }
 
-export async function applyCopilotDecision(row, { dryRun = false, freezeUntil = "" } = {}) {
+function fieldEmail(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function namesEqual(a, b) {
+  return String(a || "").trim() === String(b || "").trim();
+}
+
+async function applySocial(row, { dryRun }) {
+  const existing = String(row.decision_notes || "");
+  const alreadySent = existing
+    .toLowerCase()
+    .includes(RESUBMIT_HANDLES_EMAILED_NOTE);
+  const notes = withResubmitHandlesEmailedNote(existing);
+
+  if (alreadySent) {
+    console.log("   ⏭️  social nudge already sent — keep Review row");
+    return "nudged_social:already_sent";
+  }
+
+  const result = await sendResubmitHandlesEmail({
+    email: row.contact_email,
+    mtEmail: row.mt_email,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    dryRun,
+    requireSend: !dryRun,
+  });
+
+  if (dryRun) {
+    console.log(`   (DRY_RUN: would stamp Review notes "${notes}")`);
+    return "nudged_social";
+  }
+
+  if (!result?.sent && result?.channel !== "invalid_to") {
+    throw new Error(
+      `social nudge was not sent to ${row.contact_email} (${result?.channel})`
+    );
+  }
+
+  if (!result?.sent) return "nudged_social";
+
+  row.decision_notes = notes;
+  await updateCopilotByEmail(row.contact_email, {
+    decision_notes: notes,
+  });
+  const patched = await patchReviewDecisionNotes(row.contact_email, notes);
+  if (patched) {
+    console.log(`   📝 Review notes: ${notes}`);
+  } else {
+    console.warn(
+      `   ⚠️  Review row not found to stamp notes for ${row.contact_email}`
+    );
+  }
+  return "nudged_social";
+}
+
+async function applyUpdate(row, { dryRun, patch = {} }) {
+  const lookupEmail = fieldEmail(row.contact_email);
+  const fields = {};
+  const changes = [];
+
+  const newEmail = fieldEmail(patch.newEmail);
+  if (newEmail && newEmail !== lookupEmail) {
+    const taken = await getCopilotByEmail(newEmail);
+    if (taken) {
+      throw new Error(`new_email already in copilot_db: ${newEmail}`);
+    }
+    fields.contact_email = newEmail;
+    changes.push(`contact_email ${lookupEmail} → ${newEmail}`);
+  }
+
+  const firstName = String(patch.firstName || "").trim();
+  if (firstName && !namesEqual(firstName, row.first_name)) {
+    fields.first_name = firstName;
+    changes.push(`first_name → ${firstName}`);
+  }
+  const lastName = String(patch.lastName || "").trim();
+  if (lastName && !namesEqual(lastName, row.last_name)) {
+    fields.last_name = lastName;
+    changes.push(`last_name → ${lastName}`);
+  }
+
+  const mtEmail = fieldEmail(patch.mtEmail);
+  if (mtEmail && mtEmail !== fieldEmail(row.mt_email)) {
+    fields.mt_email = mtEmail;
+    changes.push(`mt_email ${fieldEmail(row.mt_email) || "(none)"} → ${mtEmail}`);
+  }
+
+  const igRaw = String(patch.igHandle || patch.igUrl || "").trim();
+  if (igRaw) {
+    const nextHandle = storedIgHandle(igRaw);
+    const curHandle = storedIgHandle(row.ig_handle || row.ig_url || "");
+    if (nextHandle && nextHandle !== curHandle) {
+      fields.ig_handle = nextHandle;
+      fields.ig_url = igProfileUrl(igRaw) || null;
+      changes.push(`ig_handle → ${nextHandle.replace(/\n/g, ", ")}`);
+    }
+  }
+
+  const promo = String(patch.promoCode || "")
+    .trim()
+    .toUpperCase();
+  const currentPromo = String(row.promo_code || "")
+    .trim()
+    .toUpperCase();
+  if (promo && promo !== currentPromo) {
+    const taken = await listTakenPromoCodes();
+    if (taken.has(promo)) {
+      throw new Error(`promo_code already used: ${promo}`);
+    }
+    fields.promo_code = promo;
+    fields.offer_link = buildOfferLink(promo);
+    changes.push(`promo_code ${currentPromo || "(none)"} → ${promo}`);
+  }
+
+  if (!changes.length) {
+    throw new Error(
+      "update: fill new_email, mt_email, promo_code, and/or ig_handle with a value that differs from copilot_db",
+    );
+  }
+
+  if (dryRun) {
+    console.log(`   (DRY_RUN: would update ${changes.join("; ")})`);
+    if (fields.promo_code && row.discount_id) {
+      console.log(
+        `   (DRY_RUN: would patch MT discount ${row.discount_id} code → ${fields.promo_code})`,
+      );
+    }
+    return "updated";
+  }
+
+  if (fields.contact_email) {
+    console.log(
+      "   ℹ️  Also change this email on the ops tracker sheet so sync does not recreate the old row",
+    );
+  }
+
+  if (fields.promo_code && row.discount_id) {
+    await patchCopilotDiscount({
+      discountId: row.discount_id,
+      promoCode: fields.promo_code,
+      tier: row.tier,
+      region: row.region,
+      firstName: fields.first_name || row.first_name,
+      lastName: fields.last_name || row.last_name,
+    });
+  }
+
+  await updateCopilotByEmail(lookupEmail, {
+    ...fields,
+    decision_applied_at: "NOW",
+  });
+  return `updated:${changes.join("; ")}`;
+}
+
+export async function applyCopilotDecision(row, { dryRun = false, freezeUntil = "", patch = {} } = {}) {
   const decision = String(row.decision || "")
     .trim()
     .toLowerCase();
@@ -537,6 +705,8 @@ export async function applyCopilotDecision(row, { dryRun = false, freezeUntil = 
     !userId &&
     decision !== "offboard" &&
     decision !== "snooze" &&
+    decision !== "update" &&
+    decision !== "social" &&
     !isNeverAgainDecision(decision)
   ) {
     throw new Error("missing user_id");
@@ -558,6 +728,8 @@ export async function applyCopilotDecision(row, { dryRun = false, freezeUntil = 
   if (decision === "freeze") {
     return applyFreeze(row, { dryRun, freezeUntil });
   }
+  if (decision === "update") return applyUpdate(row, { dryRun, patch });
+  if (decision === "social") return applySocial(row, { dryRun });
 
   throw new Error(`Unknown decision: ${decision}`);
 }

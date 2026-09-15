@@ -11,19 +11,24 @@
 --   2. Or the IG handle / URL contains the ops placeholder "re-submit" /
 --      "resubmit" (they stay until the handle is a real username).
 --   3. Or there is no Mariana Tek user_id (MT account not found).
--- Gym-only / no-membership rows stay off Review unless they match (2) or (3).
+--   4. Or there is no live Co-Pilot membership (no Co-Pilot-named instance
+--      in active / pending / payment_failure — includes gym-only, ended,
+--      cancelled, frozen, or missing). They stay until a live Co-Pilot
+--      term exists or ops marks them inactive.
 -- membership_end / days_to_expiry come from copilot_performance (MT
 -- calculated_end_at / scheduled_end_at / end_date / cancelled_at).
 --
 -- After a decision is applied, stay out of Review until:
 --   - snooze: 3 months after decision_at
 --   - freeze: freeze_until (or applied + 3 months), and not currently frozen
+--   - update / social: no hide; they return immediately if still in the 7-day / re-submit / no-MT window
 --   - onboard / renew / upgrade / downgrade: a new membership_start is on/after
 --     decision_applied_at AND that term is again in the 7-day window
 --   - offboard / never again: status=inactive; still on copilot_performance,
 --     but excluded from this queue
--- Re-submit / no-MT rows skip those applied-term gates so they stay on Review
--- until the handle is real or they get a user_id (or ops marks them inactive).
+-- Re-submit / no-MT / no-live-membership rows skip those applied-term gates
+-- so they stay on Review until the handle is real, they get a user_id, they
+-- have a live Co-Pilot term, or ops marks them inactive.
 -- membership_start / membership_end / days_to_expiry are from copilot_performance.
 -- Change the `days_to_expiry <= 7` filter below to change the window, then:
 --   npm run sync-copilot-db
@@ -37,8 +42,10 @@ WITH queued AS (
     p.region,
     p.tier,
     p.user_id,
+    p.mt_email,
     p.membership_status,
     p.promo_code_status,
+    p.promo_code,
     p.ig_handle,
     p.ig_url,
     p.ig_followers,
@@ -85,7 +92,13 @@ flagged AS (
     REGEXP_CONTAINS(
       LOWER(CONCAT(IFNULL(ig_handle, ''), ' ', IFNULL(ig_url, ''))),
       r're-?submit'
-    ) AS ig_resubmit
+    ) AS ig_resubmit,
+    NOT (
+      REGEXP_CONTAINS(LOWER(IFNULL(membership_name, '')), r'co[\s-]?pilot')
+      AND LOWER(IFNULL(membership_status, '')) IN (
+        'active', 'pending', 'payment_failure'
+      )
+    ) AS no_live_copilot
   FROM queued
 )
 SELECT
@@ -95,8 +108,10 @@ SELECT
   region,
   tier,
   user_id,
+  mt_email,
   membership_status,
   promo_code_status,
+  promo_code,
   ig_handle,
   ig_url,
   ig_followers,
@@ -136,6 +151,7 @@ WHERE (
     )
     OR ig_resubmit
     OR no_mt_account
+    OR no_live_copilot
   )
   AND NOT (
     LOWER(IFNULL(decision, '')) = 'snooze'
@@ -154,8 +170,9 @@ WHERE (
   AND (
     ig_resubmit
     OR no_mt_account
+    OR no_live_copilot
     OR decision_applied_at IS NULL
-    OR LOWER(IFNULL(decision, '')) IN ('snooze', 'freeze')
+    OR LOWER(IFNULL(decision, '')) IN ('snooze', 'freeze', 'update', 'social')
     OR (
       LOWER(IFNULL(decision, '')) IN ('onboard', 'renew', 'upgrade', 'downgrade')
       AND DATE(membership_start) >= DATE(decision_applied_at, 'America/New_York')

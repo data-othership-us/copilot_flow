@@ -1,6 +1,10 @@
 import dotenv from "dotenv";
 import { copilotDbRef, getBigQueryClient, getBqConfig } from "../../bqConfig.js";
 import { OFFER_LINK_PREFIX } from "../../offerLink.js";
+import {
+  DISCOUNT_CODES_FROM,
+  DISCOUNT_CODES_REF,
+} from "../../onboard/existingPromo.js";
 
 dotenv.config();
 
@@ -8,10 +12,8 @@ const bigquery = getBigQueryClient();
 const COPILOT_DB = copilotDbRef();
 const { location } = getBqConfig();
 
-const DISCOUNT_CODES = "`data-dashboard-463217.all_time_data.discount_codes`";
-
 /**
- * Look up existing MT discount ids from the weekly `discount_codes` sync
+ * Look up existing MT discount ids from `stg_mt.stg_mt_discounts`
  * (does NOT create discounts — that's onboarding-only via create-discounts).
  *
  * Writes:
@@ -21,15 +23,14 @@ const DISCOUNT_CODES = "`data-dashboard-463217.all_time_data.discount_codes`";
 export async function findDiscountIds({ dryRun = false } = {}) {
   console.log("🚀 find-discount-ids");
   console.log(`   DRY_RUN=${dryRun ? 1 : 0}`);
-  console.log(`   Source: ${DISCOUNT_CODES} (lookup only — no MT create)`);
+  console.log(`   Source: ${DISCOUNT_CODES_REF} (lookup only — no MT create)`);
 
   const previewQuery = `
     WITH discount_by_code AS (
       SELECT
         UPPER(TRIM(code)) AS promo_key,
-        ANY_VALUE(id) AS discount_id
-      FROM ${DISCOUNT_CODES},
-        UNNEST(codes) AS code
+        ANY_VALUE(CAST(discount_id AS STRING)) AS discount_id
+      FROM ${DISCOUNT_CODES_FROM}
       WHERE code IS NOT NULL AND TRIM(code) != ''
       GROUP BY 1
     )
@@ -81,9 +82,8 @@ export async function findDiscountIds({ dryRun = false } = {}) {
     FROM (
       SELECT
         UPPER(TRIM(code)) AS promo_key,
-        ANY_VALUE(id) AS discount_id
-      FROM ${DISCOUNT_CODES},
-        UNNEST(codes) AS code
+        ANY_VALUE(CAST(discount_id AS STRING)) AS discount_id
+      FROM ${DISCOUNT_CODES_FROM}
       WHERE code IS NOT NULL AND TRIM(code) != ''
       GROUP BY 1
     ) AS d
@@ -108,7 +108,7 @@ export async function findDiscountIds({ dryRun = false } = {}) {
     `   ✅ Matched update done (affected: ${matchedMeta?.numDmlAffectedRows ?? "?"})`
   );
 
-  // Offer links for promos not yet in discount_codes (still no create).
+  // Offer links for promos not yet in stg_mt_discounts (still no create).
   const offerOnlyQuery = `
     UPDATE ${COPILOT_DB}
     SET offer_link = CONCAT('${OFFER_LINK_PREFIX}', TRIM(promo_code))

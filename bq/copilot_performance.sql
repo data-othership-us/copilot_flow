@@ -6,9 +6,13 @@
 --   - data-pipeline mt_membership_instances (name / start / end by user_id)
 --   - data-pipeline mt_reservations (check-ins → total + since membership_start)
 --   - data-pipeline mt_sessions (Social Playground check-ins; private/free MT class)
---   - copilots.discount_redemption (promo code → lifetime pretax redemptions)
---   - all_time_data.discount_codes (promo_code_status: active / inactive / expired)
---   - all_time_data.order_all_time_tax via discount_codes.name
+--   - copilots.discount_redemption (lifetime pretax; matched by every code on
+--       this discount_id plus the stored copilot_db code, and by discount name)
+--   - data-pipeline stg_mt_discounts (promo_code_status; current code string by discount_id)
+--       View promo_code is the current MT code when discount_id matches, else copilot_db.
+--       Usage / cycle_points use that live code (and the voucher name via discount_id).
+--       copilot_db.promo_code is not rewritten (onboard / offer_link stay as stored).
+--   - all_time_data.order_all_time_tax via stg_mt_discounts.attr_name
 --       (promo-attributed orders in the current membership term; subtotal_pretax;
 --       plus redemption_count_since_membership_end after membership_end)
 --   - copilots.modash_content + modash_creators (Slack-bot CSV ingest)
@@ -35,7 +39,7 @@
 -- Current-term stories / feed posts: posted_at in [membership_start, membership_end].
 -- Modash impressions: posted_at >= latest Co-Pilot membership start.
 --
--- Apply via: npm run sync-copilot-db (applies this view + copilot_evaluation_queue)
+-- Apply via: npm run evaluate-copilots (applies this view + copilot_evaluation_queue)
 -- with YOUR_PROJECT replaced.
 
 CREATE OR REPLACE VIEW `YOUR_PROJECT.copilots.copilot_performance` AS
@@ -115,9 +119,46 @@ copilot_tenure AS (
   FROM copilot_instances
   GROUP BY user_id
 ),
+-- Current MT voucher: display name + every code still on the discount.
+-- Prefer the copilot_db value when it is still on the discount; otherwise
+-- the first remaining code (a rename). Usage joins all of these keys.
+current_promo AS (
+  SELECT
+    CAST(discount_id AS STRING) AS discount_id,
+    ANY_VALUE(attr_name) AS discount_name,
+    ARRAY_AGG(DISTINCT UPPER(TRIM(code)) IGNORE NULLS ORDER BY UPPER(TRIM(code))) AS promo_keys
+  FROM `data-pipeline-492715.stg_mt.stg_mt_discounts`,
+    UNNEST(JSON_VALUE_ARRAY(attr_codes)) AS code
+  WHERE TRIM(IFNULL(code, '')) != ''
+  GROUP BY 1
+),
 enriched AS (
   SELECT
-    c.*,
+    c.* EXCEPT (promo_code),
+    COALESCE(
+      IF(
+        UPPER(TRIM(IFNULL(c.promo_code, ''))) IN UNNEST(cp.promo_keys),
+        UPPER(TRIM(c.promo_code)),
+        NULL
+      ),
+      cp.promo_keys[SAFE_OFFSET(0)],
+      c.promo_code
+    ) AS promo_code,
+    cp.discount_name AS mt_discount_name,
+    ARRAY(
+      SELECT DISTINCT k
+      FROM UNNEST(
+        ARRAY_CONCAT(
+          IFNULL(cp.promo_keys, []),
+          IF(
+            TRIM(IFNULL(c.promo_code, '')) != '',
+            [UPPER(TRIM(c.promo_code))],
+            CAST([] AS ARRAY<STRING>)
+          )
+        )
+      ) AS k
+      WHERE k IS NOT NULL AND TRIM(k) != ''
+    ) AS promo_keys,
     `YOUR_PROJECT.copilots.split_ig_handles`(
       CONCAT(IFNULL(c.ig_handle, ''), ' ', IFNULL(c.ig_url, ''))
     ) AS ig_handles,
@@ -135,6 +176,8 @@ enriched AS (
     DATE(m.membership_start, 'America/New_York') AS mem_start_date,
     m.membership_end_date AS mem_end_date
   FROM roster_copilots AS c
+  LEFT JOIN current_promo AS cp
+    ON cp.discount_id = CAST(c.discount_id AS STRING)
   LEFT JOIN membership_from_pipeline AS m
     ON m.user_id = CAST(c.user_id AS STRING)
   LEFT JOIN `data-pipeline-492715.core.mt_users` AS u
@@ -236,41 +279,62 @@ playground_stats AS (
    AND DATE(pc.session_start_at, 'America/New_York') <= e.mem_end_date
   GROUP BY e.contact_email
 ),
-redemption_by_code_currency AS (
-  SELECT
-    UPPER(TRIM(code)) AS promo_key,
-    currency,
-    SUM(redemption_count) AS redemption_count,
-    SUM(CAST(subtotal_pretax AS FLOAT64)) AS subtotal_pretax
-  FROM `YOUR_PROJECT.copilots.discount_redemption`,
-    UNNEST(discount_code) AS code
-  WHERE code IS NOT NULL AND TRIM(code) != ''
-  GROUP BY 1, 2
-),
 redemptions AS (
   SELECT
-    promo_key,
+    contact_email,
     SUM(redemption_count) AS redemption_count,
-    SUM(IF(UPPER(currency) = 'USD', subtotal_pretax, 0)) AS redemption_subtotal_usd,
-    SUM(IF(UPPER(currency) = 'CAD', subtotal_pretax, 0)) AS redemption_subtotal_cad
-  FROM redemption_by_code_currency
-  GROUP BY 1
+    SUM(IF(UPPER(IFNULL(currency, '')) = 'USD', CAST(subtotal_pretax AS FLOAT64), 0)) AS redemption_subtotal_usd,
+    SUM(IF(UPPER(IFNULL(currency, '')) = 'CAD', CAST(subtotal_pretax AS FLOAT64), 0)) AS redemption_subtotal_cad
+  FROM (
+    SELECT DISTINCT
+      e.contact_email,
+      r.discount_code_name,
+      r.currency,
+      r.redemption_count,
+      r.subtotal_pretax
+    FROM enriched AS e
+    JOIN UNNEST(e.promo_keys) AS pk
+    JOIN (
+      SELECT
+        UPPER(TRIM(code)) AS promo_key,
+        discount_code_name,
+        currency,
+        redemption_count,
+        subtotal_pretax
+      FROM `YOUR_PROJECT.copilots.discount_redemption`,
+        UNNEST(IFNULL(discount_code, [])) AS code
+      WHERE TRIM(IFNULL(code, '')) != ''
+    ) AS r
+      ON r.promo_key = pk
+    UNION DISTINCT
+    SELECT
+      e.contact_email,
+      r.discount_code_name,
+      r.currency,
+      r.redemption_count,
+      r.subtotal_pretax
+    FROM enriched AS e
+    JOIN `YOUR_PROJECT.copilots.discount_redemption` AS r
+      ON NULLIF(TRIM(e.mt_discount_name), '') IS NOT NULL
+     AND TRIM(r.discount_code_name) = TRIM(e.mt_discount_name)
+  )
+  GROUP BY contact_email
 ),
 -- Map each active copilot → MT discount display name (for order attribution)
 discount_names AS (
   SELECT
-    CAST(id AS STRING) AS discount_id,
-    name AS discount_name,
+    CAST(discount_id AS STRING) AS discount_id,
+    attr_name AS discount_name,
     UPPER(TRIM(code)) AS promo_key,
     CASE
-      WHEN is_active IS FALSE THEN 'inactive'
-      WHEN end_datetime IS NOT NULL
-        AND end_datetime < CURRENT_TIMESTAMP() THEN 'expired'
-      WHEN is_active IS TRUE THEN 'active'
+      WHEN attr_is_active IS FALSE THEN 'inactive'
+      WHEN attr_end_datetime IS NOT NULL
+        AND attr_end_datetime < CURRENT_TIMESTAMP() THEN 'expired'
+      WHEN attr_is_active IS TRUE THEN 'active'
       ELSE CAST(NULL AS STRING)
     END AS promo_code_status
-  FROM `data-dashboard-463217.all_time_data.discount_codes`,
-    UNNEST(codes) AS code
+  FROM `data-pipeline-492715.stg_mt.stg_mt_discounts`,
+    UNNEST(JSON_VALUE_ARRAY(attr_codes)) AS code
   WHERE code IS NOT NULL AND TRIM(code) != ''
 ),
 promo_status_by_id AS (
@@ -607,7 +671,7 @@ LEFT JOIN session_stats AS sess
 LEFT JOIN playground_stats AS pg
   ON pg.contact_email = e.contact_email
 LEFT JOIN redemptions AS r
-  ON r.promo_key = UPPER(TRIM(e.promo_code))
+  ON r.contact_email = e.contact_email
 LEFT JOIN sales_current_membership AS scm
   ON scm.contact_email = e.contact_email
 LEFT JOIN sales_after_membership AS sam

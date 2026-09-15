@@ -293,31 +293,80 @@ export async function listApplicationsByEmail(email) {
 }
 
 /**
- * Mark an older duplicate and leave a page comment.
- * Uses Duplicate (not Rejected) so they never get the rejection email/credit.
+ * Mark a card Duplicate with a page comment. No rejection email/credit.
  */
-export async function markDuplicateApplication(pageId, newestApp) {
+async function setDuplicateStatusWithComment(pageId, comment) {
   const notion = getNotionClient();
   const p = config.notion.props;
-  const newestLabel =
-    [newestApp.firstName, newestApp.lastName].filter(Boolean).join(" ") ||
-    newestApp.email ||
-    "newer application";
-
   await notion.pages.update({
     page_id: pageId,
     properties: {
       ...buildStatusUpdate(p.status, config.notion.status.duplicate),
     },
   });
-
-  const comment =
-    `Duplicate found — keeping newest application (${newestLabel}) for evaluation. This older application was moved to Duplicate.`;
-
   await notion.comments.create({
     parent: { page_id: pageId },
     rich_text: [{ type: "text", text: { content: comment } }],
   });
+}
+
+/**
+ * Mark an older duplicate and leave a page comment.
+ * Uses Duplicate (not Rejected) so they never get the rejection email/credit.
+ */
+export async function markDuplicateApplication(pageId, newestApp) {
+  const newestLabel =
+    [newestApp.firstName, newestApp.lastName].filter(Boolean).join(" ") ||
+    newestApp.email ||
+    "newer application";
+  await setDuplicateStatusWithComment(
+    pageId,
+    `Duplicate found — keeping newest application (${newestLabel}) for evaluation. This older application was moved to Duplicate.`
+  );
+}
+
+/**
+ * If this email already has an Onboarded card, move extra No Status /
+ * Evaluated / Accepted cards to Duplicate. Leaves the Onboarded card alone.
+ * @returns {Promise<string[]>} marked Notion page ids
+ */
+export async function markExtraApplicationsWhenOnboardedExists(
+  email,
+  { dryRun = false } = {}
+) {
+  if (!email) return [];
+
+  const siblings = await listApplicationsByEmail(email);
+  const onboarded = config.notion.status.onboarded || "Onboarded";
+  const skipStatuses = new Set([
+    onboarded,
+    config.notion.status.duplicate,
+    config.notion.status.rejected,
+    config.notion.status.rejectedContacted || "Rejected - Contacted",
+  ]);
+
+  if (!siblings.some((s) => s.status === onboarded)) return [];
+
+  const comment =
+    "Already an active Co-Pilot — this extra application was moved to Duplicate. The existing Onboarded card was left as-is.";
+
+  const markedIds = [];
+  for (const sib of siblings) {
+    if (skipStatuses.has(sib.status)) continue;
+    if (dryRun) {
+      console.log(
+        `   (DRY_RUN: would mark extra application Duplicate ${sib.fullName || sib.email} [${sib.status}])`
+      );
+      markedIds.push(sib.notionPageId);
+      continue;
+    }
+    await setDuplicateStatusWithComment(sib.notionPageId, comment);
+    console.log(
+      `   🗑️  Extra application → Duplicate: ${sib.fullName || sib.email} (was ${sib.status})`
+    );
+    markedIds.push(sib.notionPageId);
+  }
+  return markedIds;
 }
 
 /**

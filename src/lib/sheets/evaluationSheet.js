@@ -12,6 +12,7 @@ const REVIEW_HEADERS = [
   "membership_status",
   "membership_name",
   "promo_code_status",
+  "promo_code",
   "membership_start",
   "membership_end",
   "months_since_membership_start",
@@ -40,6 +41,8 @@ const REVIEW_HEADERS = [
   "new_hybrid_sales",
   "decision",
   "freeze_until",
+  "new_email",
+  "mt_email",
   "decision_notes",
 ];
 
@@ -50,26 +53,59 @@ function headerCol(name) {
 }
 
 const COL = {
+  firstName: headerCol("first_name"),
+  lastName: headerCol("last_name"),
   email: headerCol("email"),
   region: headerCol("region"),
   tier: headerCol("tier"),
   daysToExpiry: headerCol("days_to_expiry"),
+  promoCode: headerCol("promo_code"),
+  igHandle: headerCol("ig_handle"),
+  igUrl: headerCol("ig_url"),
   bbSales: headerCol("bb_sales"),
   hybridSales: headerCol("hybrid_sales"),
   newHybridSales: headerCol("new_hybrid_sales"),
   decision: headerCol("decision"),
   freezeUntil: headerCol("freeze_until"),
+  newEmail: headerCol("new_email"),
+  mtEmail: headerCol("mt_email"),
   decisionNotes: headerCol("decision_notes"),
 };
 
 const PRESERVED_COLS = [
   COL.decision,
   COL.freezeUntil,
+  COL.newEmail,
   COL.decisionNotes,
   COL.bbSales,
   COL.hybridSales,
   COL.newHybridSales,
 ];
+
+const UPDATE_INPUT_COLS = [
+  COL.firstName,
+  COL.lastName,
+  COL.promoCode,
+  COL.igHandle,
+  COL.igUrl,
+  COL.newEmail,
+  COL.mtEmail,
+];
+
+const EDITABLE_COLS = [
+  ...new Set([...PRESERVED_COLS, ...UPDATE_INPUT_COLS]),
+].sort((a, b) => a - b);
+
+/** Required to add freeze / onboard / update by hand. */
+const REQUIRED_MANUAL_COLS = [COL.email, COL.decision];
+
+const OPTIONAL_EDITABLE_COLS = EDITABLE_COLS.filter(
+  (i) => !REQUIRED_MANUAL_COLS.includes(i),
+);
+
+const FILL_WHITE = { red: 1, green: 1, blue: 1 };
+const FILL_EDITABLE = { red: 1, green: 242 / 255, blue: 204 / 255 };
+const FILL_REQUIRED = { red: 248 / 255, green: 203 / 255, blue: 173 / 255 };
 
 const DECISION_VALUES = [
   "onboard",
@@ -80,7 +116,17 @@ const DECISION_VALUES = [
   "downgrade",
   "snooze",
   "freeze",
+  "update",
+  "social",
 ];
+
+const PAYMENT_NUDGE_NOTE = "payment method nudge sent";
+const APPLY_FAILED_PREFIX = "apply failed:";
+
+/** Any filled decision ops added off-queue stays until apply succeeds. */
+export function isManualReviewDecision(value) {
+  return Boolean(parseDecision(value));
+}
 
 export function isNeverAgainDecision(value) {
   const v = String(value || "")
@@ -104,7 +150,9 @@ function parseDaysToExpiry(value) {
 /**
  * Offboard / never again / renew / upgrade / downgrade: ops can fill
  * Review in the 7-day window, but membership + email wait until last day
- * (days_to_expiry <= 0). Missing days_to_expiry holds so we do not apply early.
+ * (days_to_expiry <= 0). Missing days_to_expiry holds queue rows so we do
+ * not apply early. Manual off-queue rows with a blank days_to_expiry apply
+ * immediately (ops added them on purpose).
  */
 export function shouldHoldUntilExpiry(item) {
   const decision = String(item?.decision || "")
@@ -117,7 +165,7 @@ export function shouldHoldUntilExpiry(item) {
     decision === "downgrade";
   if (!hold) return false;
   const days = parseDaysToExpiry(item?.daysToExpiry);
-  if (days == null) return true;
+  if (days == null) return !item?.manual;
   return days > 0;
 }
 
@@ -165,8 +213,27 @@ function daysSortValue(value) {
   return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
 }
 
-/** Region A–Z, then Seeker → Wayfinder → Luminary, then soonest expiry. */
+/**
+ * Parked Review rows: payment-method hold, last-day apply wait, or apply failed.
+ * These stay on the tab but sort below people Christine still needs to decide.
+ */
+export function isReviewHoldRow(cells) {
+  const notes = String(cells?.[COL.decisionNotes] || "").toLowerCase();
+  if (notes.includes("payment method nudge")) return true;
+  if (notes.includes(APPLY_FAILED_PREFIX)) return true;
+  return shouldHoldUntilExpiry({
+    decision: parseDecision(cells?.[COL.decision]),
+    daysToExpiry: parseDaysToExpiry(cells?.[COL.daysToExpiry]),
+  });
+}
+
+/**
+ * Actionable rows first, then holds.
+ * Within each group: region A–Z, Seeker → Wayfinder → Luminary, soonest expiry.
+ */
 export function compareReviewRows(a, b) {
+  const hold = Number(isReviewHoldRow(a)) - Number(isReviewHoldRow(b));
+  if (hold) return hold;
   const ra = textKey(a[COL.region]);
   const rb = textKey(b[COL.region]);
   if (!ra !== !rb) return ra ? -1 : 1;
@@ -446,6 +513,35 @@ function clearValidations(endColumnIndex) {
   };
 }
 
+function consecutiveColRanges(indices) {
+  const sorted = [...new Set(indices)].sort((a, b) => a - b);
+  const ranges = [];
+  for (const i of sorted) {
+    const last = ranges[ranges.length - 1];
+    if (last && i === last.endColumnIndex) last.endColumnIndex = i + 1;
+    else ranges.push({ startColumnIndex: i, endColumnIndex: i + 1 });
+  }
+  return ranges;
+}
+
+function fillColumns(sheetId, startColumnIndex, endColumnIndex, color) {
+  return {
+    repeatCell: {
+      range: {
+        sheetId,
+        startRowIndex: 0,
+        endRowIndex: VALIDATION_ROW_CAP,
+        startColumnIndex,
+        endColumnIndex,
+      },
+      cell: {
+        userEnteredFormat: { backgroundColor: color },
+      },
+      fields: "userEnteredFormat.backgroundColor",
+    },
+  };
+}
+
 async function ensureDropdowns(sheets, spreadsheetId) {
   const reviewId = await ensureGridSize(sheets, spreadsheetId, reviewTab(), {
     rows: VALIDATION_ROW_CAP,
@@ -459,6 +555,7 @@ async function ensureDropdowns(sheets, spreadsheetId) {
     },
   });
   const props = await sheetProps(sheets, spreadsheetId, reviewTab());
+  const colCount = Math.max(props?.columnCount || 0, REVIEW_HEADERS.length);
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
     requestBody: {
@@ -470,13 +567,32 @@ async function ensureDropdowns(sheets, spreadsheetId) {
           listValidation(COL.decision, DECISION_VALUES, { strict: true }),
         ),
         withSheet(dateValidation(COL.freezeUntil)),
+        fillColumns(reviewId, 0, colCount, FILL_WHITE),
+        ...consecutiveColRanges(OPTIONAL_EDITABLE_COLS).map((range) =>
+          fillColumns(
+            reviewId,
+            range.startColumnIndex,
+            range.endColumnIndex,
+            FILL_EDITABLE,
+          ),
+        ),
+        ...consecutiveColRanges(REQUIRED_MANUAL_COLS).map((range) =>
+          fillColumns(
+            reviewId,
+            range.startColumnIndex,
+            range.endColumnIndex,
+            FILL_REQUIRED,
+          ),
+        ),
       ],
     },
   });
 }
 
 export const RESUBMIT_HANDLE_NOTE = "need to resubmit social handles";
+export const RESUBMIT_HANDLES_EMAILED_NOTE = "resubmit handles email sent";
 export const NO_MT_ACCOUNT_NOTE = "No MT account found";
+export const NO_LIVE_MEMBERSHIP_NOTE = "No active Co-Pilot membership";
 
 export function isResubmitIgRow(r) {
   const raw = `${r?.ig_handle || ""} ${r?.ig_url || ""}`;
@@ -487,6 +603,12 @@ export function isMissingMtAccountRow(r) {
   return !String(r?.user_id ?? "").trim();
 }
 
+/** True when performance has no Co-Pilot-named term at all (never had one). */
+export function isMissingLiveCopilotMembershipRow(r) {
+  if (isMissingMtAccountRow(r)) return false;
+  return !/co[\s-]?pilot/i.test(String(r?.membership_name || ""));
+}
+
 function appendDecisionNote(existing, note) {
   const cur = String(existing || "").trim();
   if (!note) return cur;
@@ -495,15 +617,60 @@ function appendDecisionNote(existing, note) {
   return `${cur}; ${note}`;
 }
 
+function withoutDecisionNote(existing, note) {
+  const want = String(note || "")
+    .trim()
+    .toLowerCase();
+  if (!want) return String(existing || "").trim();
+  return String(existing || "")
+    .split(/\s*;\s*/)
+    .filter((part) => part && part.toLowerCase() !== want)
+    .join("; ");
+}
+
+/** Replace the resubmit flag with a sent marker. Keeps any other ops notes. */
+export function withResubmitHandlesEmailedNote(existing, sentAt = new Date()) {
+  const date = freezeUntilDateString(sentAt);
+  const emailed = date
+    ? `${RESUBMIT_HANDLES_EMAILED_NOTE} ${date}`
+    : RESUBMIT_HANDLES_EMAILED_NOTE;
+  const notes = withoutDecisionNote(existing, RESUBMIT_HANDLE_NOTE);
+  if (notes.toLowerCase().includes(RESUBMIT_HANDLES_EMAILED_NOTE)) {
+    return notes;
+  }
+  return appendDecisionNote(notes, emailed);
+}
+
+/** Review decision_notes by contact email (lowercase). */
+export async function listReviewDecisionNotesByEmail() {
+  const { rows } = await readTab(reviewTab());
+  const map = new Map();
+  for (const r of rows) {
+    if (!r.email) continue;
+    map.set(r.email, String(r.cells[COL.decisionNotes] || "").trim());
+  }
+  return map;
+}
+
 /** Stamp queue-flag notes without wiping ops / payment-nudge notes. */
 export function withQueueFlagNotes(cells, rec) {
   const out = [...cells];
   let notes = out[COL.decisionNotes];
-  if (isResubmitIgRow(rec)) {
+  if (
+    isResubmitIgRow(rec) &&
+    !String(notes || "")
+      .toLowerCase()
+      .includes(RESUBMIT_HANDLES_EMAILED_NOTE)
+  ) {
     notes = appendDecisionNote(notes, RESUBMIT_HANDLE_NOTE);
   }
   if (isMissingMtAccountRow(rec)) {
     notes = appendDecisionNote(notes, NO_MT_ACCOUNT_NOTE);
+  }
+  if (isMissingLiveCopilotMembershipRow(rec)) {
+    notes = appendDecisionNote(notes, NO_LIVE_MEMBERSHIP_NOTE);
+  } else {
+    notes = withoutDecisionNote(notes, NO_LIVE_MEMBERSHIP_NOTE);
   }
   out[COL.decisionNotes] = notes;
   return out;
@@ -522,6 +689,7 @@ export function rowFromQueue(r) {
     r.membership_status || "",
     r.membership_name || "",
     r.promo_code_status || "",
+    r.promo_code || "",
     fmtDate(r.membership_start),
     fmtDate(r.membership_end),
     fmtNum(r.months_since_membership_start),
@@ -549,6 +717,8 @@ export function rowFromQueue(r) {
     fmtNum(r.new_hybrid_sales),
     "",
     "",
+    "",
+    r.mt_email || "",
     "",
   ];
 }
@@ -694,12 +864,17 @@ export async function writeAddToModashQueue(queueRows) {
 }
 
 /**
- * Rewrite Review from the queue, sorted by region → tier → days to expiry.
+ * Rewrite Review from the queue. Holds (payment-method, last-day wait,
+ * apply-failed) sort last; otherwise region → tier → days to expiry.
  * Preserves Christine's decision / freeze_until / decision_notes / bb_sales /
  * hybrid_sales / new_hybrid_sales for people still in the queue. If someone
  * drops out (live term with more than 7 days left), they leave Review.
- * `unappliedByEmail` restores those cells from copilot_db when they re-enter
- * and the sheet cell is blank.
+ * Unapplied off-queue rows that ops added stay until apply succeeds;
+ * applied rows are deleted and not restored. `unappliedByEmail`
+ * restores those cells from copilot_db when they re-enter and the sheet cell
+ * is blank, and restores off-queue freeze / onboard / offboard after a failed
+ * apply. Update rows are restored from the sheet only (the new field values
+ * live there).
  */
 export async function appendReviewQueue(queueRows, { unappliedByEmail } = {}) {
   const sheets = getSheetsClient();
@@ -734,6 +909,11 @@ export async function appendReviewQueue(queueRows, { unappliedByEmail } = {}) {
       for (const i of PRESERVED_COLS) {
         if (cellFilled(found.cells[i])) merged[i] = found.cells[i];
       }
+      if (parseDecision(found.cells[COL.decision]) === "update") {
+        for (const i of UPDATE_INPUT_COLS) {
+          if (cellFilled(found.cells[i])) merged[i] = found.cells[i];
+        }
+      }
     }
     const email = String(merged[COL.email] || "")
       .trim()
@@ -745,7 +925,7 @@ export async function appendReviewQueue(queueRows, { unappliedByEmail } = {}) {
   const seen = new Set();
   let skipped = 0;
   let appended = 0;
-  const carried = 0;
+  let carried = 0;
 
   for (const rec of queueRows) {
     const next = rowFromQueue(rec);
@@ -757,6 +937,28 @@ export async function appendReviewQueue(queueRows, { unappliedByEmail } = {}) {
       withQueueFlagNotes(mergePreserved(next, byEmail.get(email)), rec),
     );
     seen.add(email);
+  }
+
+  for (const existing of reviewRows) {
+    if (!existing.email || seen.has(existing.email)) continue;
+    if (!isManualReviewDecision(existing.cells[COL.decision])) continue;
+    rebuilt.push(
+      overlayUnappliedDecision(
+        padReviewCells(existing.cells),
+        unapplied.get(existing.email),
+      ),
+    );
+    seen.add(existing.email);
+    carried++;
+  }
+
+  for (const [email, rec] of unapplied) {
+    if (!email || seen.has(email)) continue;
+    if (parseDecision(rec?.decision) === "update") continue;
+    if (!isManualReviewDecision(rec?.decision)) continue;
+    rebuilt.push(rowFromUnapplied(rec));
+    seen.add(email);
+    carried++;
   }
 
   rebuilt.sort(compareReviewRows);
@@ -778,6 +980,20 @@ function padReviewCells(cells) {
     out[i] = cells?.[i] ?? "";
   }
   return out;
+}
+
+function rowFromUnapplied(unapplied) {
+  const out = Array(REVIEW_HEADERS.length).fill("");
+  out[COL.firstName] = unapplied?.first_name || "";
+  out[COL.lastName] = unapplied?.last_name || "";
+  out[COL.email] = String(unapplied?.contact_email || "")
+    .trim()
+    .toLowerCase();
+  out[COL.region] = unapplied?.region || "";
+  out[COL.tier] = unapplied?.tier || "";
+  out[COL.promoCode] = unapplied?.promo_code || "";
+  out[COL.mtEmail] = unapplied?.mt_email || "";
+  return overlayUnappliedDecision(out, unapplied);
 }
 
 function sheetDecisionValue(value) {
@@ -811,11 +1027,23 @@ export function parseDecision(value) {
   const v = String(value || "")
     .trim()
     .toLowerCase();
+  if (v === "re-onboard" || v === "reonboard" || v === "re onboard") {
+    return "onboard";
+  }
   if (DECISION_VALUES.includes(v)) return v;
   return "";
 }
 
-const PAYMENT_NUDGE_NOTE = "payment method nudge sent";
+/** Keep ops notes; replace any previous apply-failed line. */
+export function withApplyFailedNote(existing, message) {
+  const cur = String(existing || "").trim();
+  const kept = cur
+    .split(/\s*;\s*/)
+    .filter((part) => part && !part.toLowerCase().startsWith(APPLY_FAILED_PREFIX))
+    .join("; ");
+  const detail = String(message || "unknown error").trim() || "unknown error";
+  return appendDecisionNote(kept, `${APPLY_FAILED_PREFIX} ${detail}`);
+}
 
 /** Keep ops notes; add the hold marker if it is not already there. */
 export function withPaymentNudgeNote(existing) {
@@ -887,6 +1115,13 @@ export async function listReadyDecisionsFromSheet() {
       decision: parseDecision(r.cells[COL.decision]),
       decisionNotes: String(r.cells[COL.decisionNotes] || "").trim(),
       freezeUntil: String(r.cells[COL.freezeUntil] || "").trim(),
+      newEmail: String(r.cells[COL.newEmail] || "").trim().toLowerCase(),
+      mtEmail: String(r.cells[COL.mtEmail] || "").trim().toLowerCase(),
+      promoCode: String(r.cells[COL.promoCode] || "").trim(),
+      igHandle: String(r.cells[COL.igHandle] || "").trim(),
+      igUrl: String(r.cells[COL.igUrl] || "").trim(),
+      firstName: String(r.cells[COL.firstName] || "").trim(),
+      lastName: String(r.cells[COL.lastName] || "").trim(),
       daysToExpiry: parseDaysToExpiry(r.cells[COL.daysToExpiry]),
       bbSales: parseMoney(r.cells[COL.bbSales]),
       hybridSales: parseMoney(r.cells[COL.hybridSales]),

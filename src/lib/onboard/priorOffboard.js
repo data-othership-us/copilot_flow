@@ -177,6 +177,13 @@ function needsReviewActiveOnboardedComment() {
   );
 }
 
+function alreadyActiveOnboardedComment() {
+  return (
+    "Already active in copilot_db, so this card was moved to Onboarded. " +
+    "No new membership or welcome email was created."
+  );
+}
+
 /**
  * Needs review + inactive (or no active roster row): send the card back to
  * Evaluated so ops can decide without the onboard job picking them up.
@@ -222,22 +229,23 @@ export async function returnNeedsReviewToEvaluated(
 }
 
 /**
- * Needs review + already active on the roster: they are in the program.
+ * Already active on the roster: they are in the program.
  * Stamp Onboarded; do not provision a new membership or send welcome email.
  */
-export async function stampOnboardedForActiveNeedsReview(
+export async function stampOnboardedForActiveCopilot(
   app,
   copilot,
-  { dryRun, email } = {}
+  { dryRun, email, comment, reason } = {}
 ) {
   const onboarded = config.notion.status.onboarded;
   const current = String(app?.status || "").trim();
   const alreadyOnboarded =
     Boolean(current) && current.toLowerCase() === onboarded.toLowerCase();
+  const why = reason || "copilot_db is active";
   console.log(
     alreadyOnboarded
-      ? `   ✅ Re-onboard=Needs review but copilot_db is active — already ${onboarded}`
-      : "   ✅ Re-onboard=Needs review but copilot_db is active — Notion → Onboarded"
+      ? `   ✅ ${why} — already ${onboarded}`
+      : `   ✅ ${why} — Notion → ${onboarded}`
   );
   if (dryRun) {
     console.log(
@@ -264,11 +272,11 @@ export async function stampOnboardedForActiveNeedsReview(
     } catch (error) {
       console.warn(`   ⚠️  BQ onboarded stamp failed: ${error.message}`);
     }
-    if (!alreadyOnboarded) {
+    if (!alreadyOnboarded && comment !== false) {
       try {
         await addApplicationComment(
           app.notionPageId,
-          needsReviewActiveOnboardedComment()
+          comment || alreadyActiveOnboardedComment()
         );
       } catch (error) {
         console.warn(`   ⚠️  Page comment failed: ${error.message}`);
@@ -276,6 +284,23 @@ export async function stampOnboardedForActiveNeedsReview(
     }
   }
   return true;
+}
+
+/**
+ * Needs review + already active on the roster: they are in the program.
+ * Stamp Onboarded; do not provision a new membership or send welcome email.
+ */
+export async function stampOnboardedForActiveNeedsReview(
+  app,
+  copilot,
+  { dryRun, email } = {}
+) {
+  return stampOnboardedForActiveCopilot(app, copilot, {
+    dryRun,
+    email,
+    comment: needsReviewActiveOnboardedComment(),
+    reason: "Re-onboard=Needs review but copilot_db is active",
+  });
 }
 
 /**

@@ -1,6 +1,5 @@
 /**
  * Build numbered step HTML for rejection / nudge emails.
- * Rejection: existing MT accounts skip the numbered list.
  * Nudge: Step 1 (create account) only when no MT account exists.
  */
 
@@ -15,23 +14,17 @@ function escapeHtml(value) {
 }
 
 /**
- * Credit thank-you block. Existing MT accounts skip the numbered "how it works" list.
- * @param {{ hasMtAccount: boolean, applicantEmail: string }} input
+ * Credit thank-you block. Same copy whether or not they already have an MT account;
+ * the account-setup sentence is conditional in the prose.
+ * @param {{ hasMtAccount?: boolean, applicantEmail: string }} input
  */
-export function buildRejectionCreditHtml({ hasMtAccount, applicantEmail }) {
-  const thankYou =
-    "As a thank-you for your time, we'd like to send you a complimentary credit for the space.";
-
-  if (hasMtAccount) {
-    return `<p>${thankYou} A credit will be automatically added within 2 business days.</p>`;
-  }
-
+export function buildRejectionCreditHtml({ applicantEmail }) {
   const email = escapeHtml(applicantEmail);
-  const steps = ol([
-    `If you don't already have an account, set up <a href="${ACCOUNT_URL}">HERE</a> using this exact email <strong>${email}</strong>.`,
-    "Once your account is created, a credit will be automatically added within 2 business days.",
-  ]);
-  return `<p>${thankYou} Here's how that works:</p>\n${steps}`;
+  return [
+    `<p>As a thank-you for your time, we'd like to send you a complimentary credit for the space.</p>`,
+    `<p>If you don't already have an account, set up <a href="${ACCOUNT_URL}">HERE</a> using this exact email <strong>${email}</strong>.</p>`,
+    `<p>Once your account is created, a credit will be automatically added within 2 business days. No need to reply to this email.</p>`,
+  ].join("\n");
 }
 
 /**

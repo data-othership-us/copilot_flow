@@ -2,9 +2,13 @@ import { copilotDbRef, getBigQueryClient, getBqConfig } from "../bqConfig.js";
 import { normalizePersonName } from "../notion/parseProps.js";
 import { basePromoCode } from "./promoCode.js";
 
-/** Weekly MT discount sync used by find-discount-ids / copilot_performance. */
+/** Live MT discounts from the data-pipeline staging table. Codes are JSON. */
 export const DISCOUNT_CODES_REF =
-  "`data-dashboard-463217.all_time_data.discount_codes`";
+  "`data-pipeline-492715.stg_mt.stg_mt_discounts`";
+
+/** FROM clause: one row per remaining voucher code. */
+export const DISCOUNT_CODES_FROM = `${DISCOUNT_CODES_REF},
+        UNNEST(JSON_VALUE_ARRAY(attr_codes)) AS code`;
 
 function slug(value) {
   return String(value || "")
@@ -35,12 +39,12 @@ function asPromo(row) {
     discountId: String(row.discount_id || "").trim(),
     name: row.name || "",
     isActive: row.is_active !== false,
-    source: "discount_codes",
+    source: "stg_mt_discounts",
   };
 }
 
 /**
- * Match Co-Pilot vouchers in `discount_codes` by exact code, discount id,
+ * Match Co-Pilot vouchers in `stg_mt.stg_mt_discounts` by exact code, discount id,
  * or "Seeker First Last" / FIRSTNAMELASTNAME name slug. Includes inactive
  * (offboarded) vouchers so we can reactivate on re-onboard.
  */
@@ -57,28 +61,27 @@ async function lookupDiscountCodes({ code, discountId, nameKeys }) {
   const [rows] = await bigquery.query({
     query: `
       SELECT
-        CAST(id AS STRING) AS discount_id,
-        name,
-        IFNULL(is_active, TRUE) AS is_active,
+        CAST(discount_id AS STRING) AS discount_id,
+        attr_name AS name,
+        IFNULL(attr_is_active, TRUE) AS is_active,
         UPPER(TRIM(code)) AS promo_code,
         CASE
           WHEN @code != '' AND UPPER(TRIM(code)) = @code THEN 0
-          WHEN @discount_id != '' AND CAST(id AS STRING) = @discount_id THEN 1
+          WHEN @discount_id != '' AND CAST(discount_id AS STRING) = @discount_id THEN 1
           ELSE 2
         END AS rank_score
-      FROM ${DISCOUNT_CODES_REF},
-        UNNEST(IFNULL(codes, [])) AS code
+      FROM ${DISCOUNT_CODES_FROM}
       WHERE TRIM(IFNULL(code, '')) != ''
         AND (
           (@code != '' AND UPPER(TRIM(code)) = @code)
-          OR (@discount_id != '' AND CAST(id AS STRING) = @discount_id)
+          OR (@discount_id != '' AND CAST(discount_id AS STRING) = @discount_id)
           OR (
             ARRAY_LENGTH(@name_keys) > 0
-            AND REGEXP_REPLACE(UPPER(IFNULL(name, '')), r'[^A-Z0-9]', '')
+            AND REGEXP_REPLACE(UPPER(IFNULL(attr_name, '')), r'[^A-Z0-9]', '')
               IN UNNEST(@name_keys)
           )
         )
-      ORDER BY rank_score, IFNULL(is_active, TRUE) DESC, SAFE_CAST(id AS INT64) DESC
+      ORDER BY rank_score, IFNULL(attr_is_active, TRUE) DESC, SAFE_CAST(discount_id AS INT64) DESC
       LIMIT 20
     `,
     location,
@@ -145,11 +148,10 @@ export async function lookupDiscountIdByPromoCode(promoCode) {
   const bigquery = getBigQueryClient();
   const [rows] = await bigquery.query({
     query: `
-      SELECT CAST(id AS STRING) AS discount_id
-      FROM ${DISCOUNT_CODES_REF},
-        UNNEST(IFNULL(codes, [])) AS code
+      SELECT CAST(discount_id AS STRING) AS discount_id
+      FROM ${DISCOUNT_CODES_FROM}
       WHERE UPPER(TRIM(code)) = @code
-      ORDER BY IFNULL(is_active, TRUE) DESC, SAFE_CAST(id AS INT64) DESC
+      ORDER BY IFNULL(attr_is_active, TRUE) DESC, SAFE_CAST(discount_id AS INT64) DESC
       LIMIT 1
     `,
     location,
@@ -159,7 +161,7 @@ export async function lookupDiscountIdByPromoCode(promoCode) {
 }
 
 /**
- * Codes already used on copilot_db or in the MT discount_codes sync
+ * Codes already used on copilot_db or in the MT stg_mt_discounts sync
  * (active and inactive — expired vouchers still occupy the code in MT).
  */
 export async function listTakenPromoCodes() {
@@ -174,8 +176,7 @@ export async function listTakenPromoCodes() {
         WHERE promo_code IS NOT NULL AND TRIM(promo_code) != ''
         UNION DISTINCT
         SELECT UPPER(TRIM(code)) AS promo_code
-        FROM ${DISCOUNT_CODES_REF},
-          UNNEST(IFNULL(codes, [])) AS code
+        FROM ${DISCOUNT_CODES_FROM}
         WHERE TRIM(IFNULL(code, '')) != ''
       )
     `,
@@ -184,7 +185,7 @@ export async function listTakenPromoCodes() {
     return new Set((rows || []).map((r) => r.promo_code).filter(Boolean));
   } catch (error) {
     console.warn(
-      `   ⚠️  taken promo lookup (discount_codes) failed: ${error.message}`
+      `   ⚠️  taken promo lookup (stg_mt_discounts) failed: ${error.message}`
     );
     const [rows] = await bigquery.query({
       query: `
@@ -232,15 +233,23 @@ export async function findExistingCopilotPromo({
       nameKeys: keys,
     });
   } catch (error) {
-    console.warn(`   ⚠️  discount_codes lookup failed: ${error.message}`);
+    console.warn(`   ⚠️  stg_mt_discounts lookup failed: ${error.message}`);
   }
 
   if (fromRow || fromId) {
-    const match =
-      candidates.find((c) => fromRow && String(c.promo_code || "").toUpperCase() === fromRow) ||
-      candidates.find((c) => fromId && String(c.discount_id || "").trim() === fromId) ||
-      null;
-    const resolvedCode = fromRow || String(match?.promo_code || "").trim();
+    const matchByCode =
+      candidates.find(
+        (c) => fromRow && String(c.promo_code || "").toUpperCase() === fromRow
+      ) || null;
+    const matchById =
+      candidates.find(
+        (c) => fromId && String(c.discount_id || "").trim() === fromId
+      ) || null;
+    const match = matchByCode || matchById || null;
+    // Prefer the current MT string when our stored code is no longer on the voucher.
+    const resolvedCode = String(
+      (matchByCode ? fromRow : match?.promo_code) || fromRow || ""
+    ).trim();
     const resolvedId = fromId || String(match?.discount_id || "").trim();
     if (!resolvedCode && !resolvedId) return null;
     return {
@@ -248,7 +257,7 @@ export async function findExistingCopilotPromo({
       discountId: resolvedId,
       name: match?.name || "",
       isActive: match ? match.is_active !== false : null,
-      source: fromRow ? "copilot_db" : "discount_codes",
+      source: fromRow ? "copilot_db" : "stg_mt_discounts",
     };
   }
 

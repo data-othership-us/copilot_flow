@@ -73,8 +73,8 @@ async function provisionPromo({
       row.discount_id
   );
   const via =
-    existingPromo?.source === "discount_codes"
-      ? ` (from MT discount_codes${existingPromo.name ? `: ${existingPromo.name}` : ""})`
+    existingPromo?.source === "stg_mt_discounts"
+      ? ` (from MT stg_mt_discounts${existingPromo.name ? `: ${existingPromo.name}` : ""})`
       : existingPromo?.source === "copilot_db"
         ? " (from copilot_db)"
         : "";
