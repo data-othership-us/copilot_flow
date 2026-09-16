@@ -469,12 +469,12 @@ export async function evaluateCopilots() {
     );
     for (const r of addPreview.slice(0, 10)) {
       console.log(
-        `   · add ${r.contact_email}  ${storedIgHandle(r.ig_handle || r.ig_url) || r.ig_handle || "?"}`,
+        `   · NOT TRACKING ${r.contact_email}  ${storedIgHandle(r.ig_handle || r.ig_url) || r.ig_handle || "?"}`,
       );
     }
     for (const r of outliers.slice(0, 10)) {
       console.log(
-        `   · outlier ${r.contact_email}  ${r.ig_handle || "re-submit"}`,
+        `   · resubmit ${r.contact_email}  ${r.ig_handle || "re-submit"}`,
       );
     }
   } else {

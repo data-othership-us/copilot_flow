@@ -1060,7 +1060,7 @@ export function rowsFromAddToModash(r) {
     [r.ig_handle, r.ig_url].filter(Boolean).join("\n")
   );
   return handles.map((bare) => [
-    "add",
+    "NOT TRACKING",
     r.first_name || "",
     r.last_name || "",
     String(r.contact_email || "").trim().toLowerCase(),
@@ -1083,7 +1083,7 @@ function rowFromSocialOutlier(r) {
   const handle = storedIgHandle(handleRaw) || handleRaw || "re-submit";
   const url = igProfileUrl(handleRaw);
   return [
-    "outlier",
+    "resubmit",
     r.first_name || "",
     r.last_name || "",
     email,
@@ -1099,9 +1099,9 @@ function rowFromSocialOutlier(r) {
 }
 
 /**
- * Rewrite Add to Modash in place. `add` rows are paste-ready handles missing
- * from modash_creators. `outlier` rows are re-submit / private / waiting —
- * do not paste those into a Modash campaign.
+ * Rewrite Add to Modash in place. `NOT TRACKING` rows are paste-ready handles
+ * missing from modash_creators. `resubmit` rows are re-submit / private /
+ * waiting — do not paste those into a Modash campaign.
  */
 export async function writeAddToModashQueue(addRows, { outliers = [] } = {}) {
   const sheets = getSheetsClient();
