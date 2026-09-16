@@ -155,11 +155,17 @@ WHERE (
     OR no_mt_account
     OR no_live_copilot
   )
-  -- Recently onboarded copilots without a live membership yet: pipeline lag.
+  -- Recently onboarded / renewed / tier-changed copilots without a live
+  -- membership yet: MT pipeline lag grace period (48 hours).
   AND NOT (
     no_live_copilot
-    AND onboarded_at IS NOT NULL
-    AND onboarded_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+    AND (
+      (onboarded_at IS NOT NULL
+       AND onboarded_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR))
+      OR (decision_applied_at IS NOT NULL
+          AND decision_applied_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+          AND LOWER(IFNULL(decision, '')) IN ('onboard', 'renew', 'upgrade', 'downgrade'))
+    )
   )
   AND NOT (
     LOWER(IFNULL(decision, '')) = 'snooze'
