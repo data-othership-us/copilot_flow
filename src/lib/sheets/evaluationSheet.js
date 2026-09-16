@@ -1060,7 +1060,7 @@ export function rowsFromAddToModash(r) {
     [r.ig_handle, r.ig_url].filter(Boolean).join("\n")
   );
   return handles.map((bare) => [
-    "NOT TRACKING",
+    "Not Tracking",
     r.first_name || "",
     r.last_name || "",
     String(r.contact_email || "").trim().toLowerCase(),
@@ -1083,7 +1083,7 @@ function rowFromSocialOutlier(r) {
   const handle = storedIgHandle(handleRaw) || handleRaw || "re-submit";
   const url = igProfileUrl(handleRaw);
   return [
-    "resubmit",
+    "Resubmit",
     r.first_name || "",
     r.last_name || "",
     email,
