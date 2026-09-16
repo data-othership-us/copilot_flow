@@ -1,6 +1,6 @@
 import { google } from "googleapis";
 import { config } from "../../config.js";
-import { isPlaceholderIgHandle, parseIgHandles } from "../instagram.js";
+import { igProfileUrl, isPlaceholderIgHandle, parseIgHandles, storedIgHandle } from "../instagram.js";
 
 const REVIEW_HEADERS = [
   "first_name",
@@ -59,9 +59,13 @@ const COL = {
   region: headerCol("region"),
   tier: headerCol("tier"),
   daysToExpiry: headerCol("days_to_expiry"),
+  membershipStatus: headerCol("membership_status"),
+  membershipName: headerCol("membership_name"),
   promoCode: headerCol("promo_code"),
   igHandle: headerCol("ig_handle"),
   igUrl: headerCol("ig_url"),
+  igFollowers: headerCol("ig_followers"),
+  membershipEnd: headerCol("membership_end"),
   bbSales: headerCol("bb_sales"),
   hybridSales: headerCol("hybrid_sales"),
   newHybridSales: headerCol("new_hybrid_sales"),
@@ -106,6 +110,11 @@ const OPTIONAL_EDITABLE_COLS = EDITABLE_COLS.filter(
 const FILL_WHITE = { red: 1, green: 1, blue: 1 };
 const FILL_EDITABLE = { red: 1, green: 242 / 255, blue: 204 / 255 };
 const FILL_REQUIRED = { red: 248 / 255, green: 203 / 255, blue: 173 / 255 };
+const FILL_HOLD_GREY = {
+  red: 217 / 255,
+  green: 217 / 255,
+  blue: 217 / 255,
+};
 
 const DECISION_VALUES = [
   "onboard",
@@ -120,7 +129,8 @@ const DECISION_VALUES = [
   "social",
 ];
 
-const PAYMENT_NUDGE_NOTE = "payment method nudge sent";
+export const PAYMENT_NUDGE_NOTE = "payment method nudge sent";
+export const OFFBOARD_END_NOTE_PREFIX = "offboarding end of term on";
 const APPLY_FAILED_PREFIX = "apply failed:";
 
 /** Any filled decision ops added off-queue stays until apply succeeds. */
@@ -142,9 +152,59 @@ export function isOffboardLikeDecision(value) {
   return v === "offboard" || isNeverAgainDecision(v);
 }
 
+export function reviewRowDecision(r) {
+  return parseDecision(r?.cells?.[COL.decision] ?? r?.decision);
+}
+
 function parseDaysToExpiry(value) {
+  if (value != null && typeof value === "object" && value.value != null) {
+    value = value.value;
+  }
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+/** Live Co-Pilot term in active / pending / payment_failure. */
+export function hasLiveCopilotMembership(r) {
+  const name = String(r?.membership_name || "");
+  const status = String(r?.membership_status || "")
+    .trim()
+    .toLowerCase();
+  return (
+    /co[\s-]?pilot/i.test(name) &&
+    ["active", "pending", "payment_failure", "frozen"].includes(status)
+  );
+}
+
+/**
+ * Membership work for Review: no MT account, no live Co-Pilot term, payment
+ * failure, or a live Co-Pilot term within 7 days of ending.
+ */
+export function isMembershipReviewRow(r) {
+  if (isMissingMtAccountRow(r)) return true;
+  const status = String(r?.membership_status || "")
+    .trim()
+    .toLowerCase();
+  if (status === "payment_failure") return true;
+  if (!hasLiveCopilotMembership(r)) return true;
+  const days = parseDaysToExpiry(r?.days_to_expiry);
+  return days != null && days <= 7;
+}
+
+export function hasResubmitHandlesEmailedNote(existing) {
+  return String(existing || "")
+    .toLowerCase()
+    .includes(RESUBMIT_HANDLES_EMAILED_NOTE);
+}
+
+/** Waiting on a public handle — Modash outlier, not a Review membership row. */
+export function isSocialOutlierRecord(r) {
+  if (isResubmitIgRow(r)) return true;
+  if (parseDecision(r?.decision) === "social") return true;
+  const notes = String(r?.decision_notes || r?.decisionNotes || "").toLowerCase();
+  if (notes.includes("private ig")) return true;
+  if (notes.includes("need to resubmit")) return true;
+  return false;
 }
 
 /**
@@ -209,31 +269,50 @@ function tierSortRank(tier) {
 }
 
 function daysSortValue(value) {
+  if (value == null || String(value).trim() === "") {
+    return Number.POSITIVE_INFINITY;
+  }
   const n = Number(value);
   return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
 }
 
 /**
- * Parked Review rows: payment-method hold, last-day apply wait, or apply failed.
- * These stay on the tab but sort below people Christine still needs to decide.
+ * Parked Review rows Christine can ignore today.
+ * `pending` = last-day apply wait, `nudge` = payment-method hold,
+ * `failed` = last apply error.
  */
-export function isReviewHoldRow(cells) {
+export function reviewHoldKind(cells) {
   const notes = String(cells?.[COL.decisionNotes] || "").toLowerCase();
-  if (notes.includes("payment method nudge")) return true;
-  if (notes.includes(APPLY_FAILED_PREFIX)) return true;
-  return shouldHoldUntilExpiry({
-    decision: parseDecision(cells?.[COL.decision]),
-    daysToExpiry: parseDaysToExpiry(cells?.[COL.daysToExpiry]),
-  });
+  if (notes.includes("payment method nudge")) return "nudge";
+  if (notes.includes(APPLY_FAILED_PREFIX)) return "failed";
+  if (
+    shouldHoldUntilExpiry({
+      decision: parseDecision(cells?.[COL.decision]),
+      daysToExpiry: parseDaysToExpiry(cells?.[COL.daysToExpiry]),
+    })
+  ) {
+    return "pending";
+  }
+  return "";
 }
 
-/**
- * Actionable rows first, then holds.
- * Within each group: region A–Z, Seeker → Wayfinder → Luminary, soonest expiry.
- */
-export function compareReviewRows(a, b) {
-  const hold = Number(isReviewHoldRow(a)) - Number(isReviewHoldRow(b));
-  if (hold) return hold;
+export function isReviewHoldRow(cells) {
+  return Boolean(reviewHoldKind(cells));
+}
+
+const HOLD_KIND_RANK = { pending: 0, nudge: 1, failed: 2 };
+
+/** 0 = needs a decision, 1 = filled and applying, 2 = grey hold. */
+function reviewBlockRank(cells) {
+  if (reviewHoldKind(cells)) return 2;
+  if (parseDecision(cells?.[COL.decision])) return 1;
+  return 0;
+}
+
+function compareReviewRowDetails(a, b) {
+  const days =
+    daysSortValue(a[COL.daysToExpiry]) - daysSortValue(b[COL.daysToExpiry]);
+  if (days) return days;
   const ra = textKey(a[COL.region]);
   const rb = textKey(b[COL.region]);
   if (!ra !== !rb) return ra ? -1 : 1;
@@ -241,12 +320,25 @@ export function compareReviewRows(a, b) {
   if (region) return region;
   const tier = tierSortRank(a[COL.tier]) - tierSortRank(b[COL.tier]);
   if (tier) return tier;
-  const days =
-    daysSortValue(a[COL.daysToExpiry]) - daysSortValue(b[COL.daysToExpiry]);
-  if (days) return days;
   return textKey(a[COL.email]).localeCompare(textKey(b[COL.email]), undefined, {
     sensitivity: "base",
   });
+}
+
+/**
+ * Needs-decision first (soonest expiry), then filled rows the job will apply,
+ * then grey nudge/pending/failed holds.
+ */
+export function compareReviewRows(a, b) {
+  const block = reviewBlockRank(a) - reviewBlockRank(b);
+  if (block) return block;
+  const aHold = reviewHoldKind(a);
+  const bHold = reviewHoldKind(b);
+  if (aHold || bHold) {
+    const kind = (HOLD_KIND_RANK[aHold] ?? 9) - (HOLD_KIND_RANK[bHold] ?? 9);
+    if (kind) return kind;
+  }
+  return compareReviewRowDetails(a, b);
 }
 
 function sheetId() {
@@ -264,6 +356,7 @@ function addToModashTab() {
 }
 
 const ADD_TO_MODASH_HEADERS = [
+  "status",
   "first_name",
   "last_name",
   "email",
@@ -274,6 +367,7 @@ const ADD_TO_MODASH_HEADERS = [
   "ig_followers",
   "membership_status",
   "membership_end",
+  "notes",
 ];
 
 export function getSheetsClient() {
@@ -411,6 +505,14 @@ async function ensureTabs(sheets, spreadsheetId) {
   }
 }
 
+/** Create Review / Add to Modash tabs and grow Review to the header width. */
+export async function ensureReviewSheetLayout() {
+  const sheets = getSheetsClient();
+  const id = sheetId();
+  await ensureTabs(sheets, id);
+  await ensureDropdowns(sheets, id);
+}
+
 async function sheetProps(sheets, spreadsheetId, title) {
   const meta = await sheets.spreadsheets.get({ spreadsheetId });
   const found = (meta.data.sheets || []).find(
@@ -525,21 +627,67 @@ function consecutiveColRanges(indices) {
 }
 
 function fillColumns(sheetId, startColumnIndex, endColumnIndex, color) {
+  return fillRange(
+    sheetId,
+    {
+      startRowIndex: 0,
+      endRowIndex: VALIDATION_ROW_CAP,
+      startColumnIndex,
+      endColumnIndex,
+    },
+    color,
+  );
+}
+
+function fillRange(sheetId, range, color) {
   return {
     repeatCell: {
-      range: {
-        sheetId,
-        startRowIndex: 0,
-        endRowIndex: VALIDATION_ROW_CAP,
-        startColumnIndex,
-        endColumnIndex,
-      },
+      range: { sheetId, ...range },
       cell: {
         userEnteredFormat: { backgroundColor: color },
       },
       fields: "userEnteredFormat.backgroundColor",
     },
   };
+}
+
+function consecutiveRowRanges(startRowIndexes) {
+  const sorted = [...new Set(startRowIndexes)].sort((a, b) => a - b);
+  const ranges = [];
+  for (const start of sorted) {
+    const last = ranges[ranges.length - 1];
+    if (last && start === last.endRowIndex) last.endRowIndex = start + 1;
+    else ranges.push({ startRowIndex: start, endRowIndex: start + 1 });
+  }
+  return ranges;
+}
+
+/** Grey the parked nudge / last-day / apply-failed rows after a rebuild. */
+async function formatReviewHoldRows(sheets, spreadsheetId, rows) {
+  const reviewId = await sheetNumericId(sheets, spreadsheetId, reviewTab());
+  if (reviewId == null) return;
+  const colCount = REVIEW_HEADERS.length;
+  const holdStarts = [];
+  for (let i = 0; i < (rows || []).length; i++) {
+    if (isReviewHoldRow(rows[i])) holdStarts.push(i + 1);
+  }
+  const requests = consecutiveRowRanges(holdStarts).map((range) =>
+    fillRange(
+      reviewId,
+      {
+        startRowIndex: range.startRowIndex,
+        endRowIndex: range.endRowIndex,
+        startColumnIndex: 0,
+        endColumnIndex: colCount,
+      },
+      FILL_HOLD_GREY,
+    ),
+  );
+  if (!requests.length) return;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests },
+  });
 }
 
 async function ensureDropdowns(sheets, spreadsheetId) {
@@ -673,6 +821,31 @@ export function withQueueFlagNotes(cells, rec) {
     notes = withoutDecisionNote(notes, NO_LIVE_MEMBERSHIP_NOTE);
   }
   out[COL.decisionNotes] = notes;
+  return withOffboardHoldNotes(out);
+}
+
+/** Keep ops notes; set / refresh the end-of-term offboard marker. */
+export function withOffboardEndOfTermNote(existing, membershipEnd) {
+  const date = fmtDate(membershipEnd);
+  if (!date) return String(existing || "").trim();
+  const note = `${OFFBOARD_END_NOTE_PREFIX} ${date}`;
+  const kept = String(existing || "")
+    .split(/\s*;\s*/)
+    .filter(
+      (part) =>
+        part && !part.toLowerCase().startsWith(OFFBOARD_END_NOTE_PREFIX),
+    )
+    .join("; ");
+  return appendDecisionNote(kept, note);
+}
+
+function withOffboardHoldNotes(cells) {
+  if (!isOffboardLikeDecision(cells?.[COL.decision])) return cells;
+  const out = [...cells];
+  out[COL.decisionNotes] = withOffboardEndOfTermNote(
+    out[COL.decisionNotes],
+    out[COL.membershipEnd],
+  );
   return out;
 }
 
@@ -749,6 +922,83 @@ function parseSheetRows(values) {
   return { idx, rows };
 }
 
+export async function listReviewSheetRows() {
+  return readTab(reviewTab());
+}
+
+function reviewRowAsRecord(r) {
+  return {
+    contact_email: r.email,
+    email: r.email,
+    first_name: r.cells[COL.firstName],
+    last_name: r.cells[COL.lastName],
+    region: r.cells[COL.region],
+    tier: r.cells[COL.tier],
+    ig_handle: r.cells[COL.igHandle],
+    ig_url: r.cells[COL.igUrl],
+    ig_followers: r.cells[COL.igFollowers],
+    decision: r.cells[COL.decision],
+    decision_notes: r.cells[COL.decisionNotes],
+    days_to_expiry: r.cells[COL.daysToExpiry],
+    membership_status: r.cells[COL.membershipStatus],
+    membership_name: r.cells[COL.membershipName],
+    membership_end: r.cells[COL.membershipEnd],
+  };
+}
+
+/** One row per email: re-submit / private / social-decision people. */
+export function collectSocialOutliers({
+  queue = [],
+  reviewRows = [],
+  unappliedRows = [],
+} = {}) {
+  const byEmail = new Map();
+  const add = (rec) => {
+    const email = String(rec?.contact_email || rec?.email || "")
+      .trim()
+      .toLowerCase();
+    if (!email) return;
+    const prev = byEmail.get(email) || {};
+    const nextNotes = rec.decision_notes || rec.decisionNotes || "";
+    const prevNotes = prev.decision_notes || "";
+    const notes = hasResubmitHandlesEmailedNote(nextNotes)
+      ? nextNotes
+      : hasResubmitHandlesEmailedNote(prevNotes)
+        ? prevNotes
+        : nextNotes || prevNotes;
+    byEmail.set(email, {
+      ...prev,
+      ...rec,
+      contact_email: email,
+      email,
+      decision_notes: notes,
+    });
+  };
+  const offboardEmails = new Set();
+  for (const r of reviewRows) {
+    const rec = reviewRowAsRecord(r);
+    if (isOffboardLikeDecision(rec.decision)) offboardEmails.add(rec.email);
+  }
+  for (const r of unappliedRows) {
+    const email = String(r?.contact_email || "")
+      .trim()
+      .toLowerCase();
+    if (email && isOffboardLikeDecision(r?.decision)) offboardEmails.add(email);
+  }
+  for (const r of queue) {
+    if (isResubmitIgRow(r) || isSocialOutlierRecord(r)) add(r);
+  }
+  for (const r of reviewRows) {
+    const rec = reviewRowAsRecord(r);
+    if (isResubmitIgRow(rec) || isSocialOutlierRecord(rec)) add(rec);
+  }
+  for (const r of unappliedRows) {
+    if (isSocialOutlierRecord(r)) add(r);
+  }
+  for (const email of offboardEmails) byEmail.delete(email);
+  return [...byEmail.values()];
+}
+
 export async function readTab(tabName) {
   const sheets = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
@@ -810,6 +1060,7 @@ export function rowsFromAddToModash(r) {
     [r.ig_handle, r.ig_url].filter(Boolean).join("\n")
   );
   return handles.map((bare) => [
+    "add",
     r.first_name || "",
     r.last_name || "",
     String(r.contact_email || "").trim().toLowerCase(),
@@ -820,35 +1071,75 @@ export function rowsFromAddToModash(r) {
     fmtNum(r.ig_followers),
     r.membership_status || "",
     fmtDate(r.membership_end),
+    "",
   ]);
 }
 
+function rowFromSocialOutlier(r) {
+  const email = String(r.contact_email || r.email || "")
+    .trim()
+    .toLowerCase();
+  const handleRaw = r.ig_handle || r.ig_url || "";
+  const handle = storedIgHandle(handleRaw) || handleRaw || "re-submit";
+  const url = igProfileUrl(handleRaw);
+  return [
+    "outlier",
+    r.first_name || "",
+    r.last_name || "",
+    email,
+    r.region || "",
+    r.tier || "",
+    handle,
+    url,
+    fmtNum(r.ig_followers),
+    r.membership_status || "",
+    fmtDate(r.membership_end),
+    String(r.decision_notes || r.decisionNotes || "").trim(),
+  ];
+}
+
 /**
- * Rewrite Add to Modash in place. Creates the tab only if it is missing;
- * never deletes the sheet. Clears values, then writes today's queue
- * (one row per missing handle + clickable ig_url). Copy the ig_handle
- * column into a Modash campaign.
+ * Rewrite Add to Modash in place. `add` rows are paste-ready handles missing
+ * from modash_creators. `outlier` rows are re-submit / private / waiting —
+ * do not paste those into a Modash campaign.
  */
-export async function writeAddToModashQueue(queueRows) {
+export async function writeAddToModashQueue(addRows, { outliers = [] } = {}) {
   const sheets = getSheetsClient();
   const id = sheetId();
   const tab = addToModashTab();
+  const outlierEmails = new Set(
+    (outliers || []).map((r) =>
+      String(r.contact_email || r.email || "")
+        .trim()
+        .toLowerCase(),
+    ).filter(Boolean),
+  );
 
   await ensureTabs(sheets, id);
-  await ensureGridSize(sheets, id, tab, {
-    rows: Math.max(queueRows.length + 1, 2),
-    columns: ADD_TO_MODASH_HEADERS.length,
-  });
 
   const rebuilt = [];
-  const seen = new Set();
-  for (const rec of queueRows) {
+  const seenHandles = new Set();
+  for (const rec of addRows || []) {
+    const email = String(rec.contact_email || rec.email || "")
+      .trim()
+      .toLowerCase();
+    if (outlierEmails.has(email) || isResubmitIgRow(rec)) continue;
     for (const next of rowsFromAddToModash(rec)) {
-      const key = handleKey(next[5]);
-      if (!key || seen.has(key)) continue;
+      const key = handleKey(next[6]);
+      if (!key || seenHandles.has(key)) continue;
       rebuilt.push(next);
-      seen.add(key);
+      seenHandles.add(key);
     }
+  }
+
+  const seenEmails = new Set();
+  for (const rec of outliers || []) {
+    const email = String(rec.contact_email || rec.email || "")
+      .trim()
+      .toLowerCase();
+    if (!email || seenEmails.has(email)) continue;
+    seenEmails.add(email);
+    rebuilt.push(rowFromSocialOutlier(rec));
   }
 
   await ensureGridSize(sheets, id, tab, {
@@ -860,7 +1151,12 @@ export async function writeAddToModashQueue(queueRows) {
     valueInputOption: "USER_ENTERED",
   });
 
-  return { total: rebuilt.length, rebuilt: true };
+  return {
+    total: rebuilt.length,
+    added: seenHandles.size,
+    outliers: seenEmails.size,
+    rebuilt: true,
+  };
 }
 
 /**
@@ -870,43 +1166,80 @@ export async function writeAddToModashQueue(queueRows) {
  * hybrid_sales / new_hybrid_sales for people still in the queue. If someone
  * drops out (live term with more than 7 days left), they leave Review.
  * Unapplied off-queue rows that ops added stay until apply succeeds;
- * applied rows are deleted and not restored. `unappliedByEmail`
- * restores those cells from copilot_db when they re-enter and the sheet cell
- * is blank, and restores off-queue freeze / onboard / offboard after a failed
- * apply. Update rows are restored from the sheet only (the new field values
- * live there).
+ * applied rows are deleted and not restored. Social-only people (live term
+ * more than 7 days out, waiting on a public handle) are not carried back
+ * onto Review unless they are a payment-method hold, apply-failed hold, or
+ * a filled offboard / never again waiting until end of term.
+
+ * `unappliedByEmail` restores those cells from copilot_db when they re-enter
+ * and the sheet cell is blank, and restores off-queue freeze / onboard /
+ * offboard after a failed apply. Update rows are restored from the sheet
+ * only (the new field values live there).
  */
-export async function appendReviewQueue(queueRows, { unappliedByEmail } = {}) {
-  const sheets = getSheetsClient();
-  const id = sheetId();
-  const tab = reviewTab();
-  const unapplied =
-    unappliedByEmail instanceof Map
-      ? unappliedByEmail
-      : new Map(
-          Object.entries(unappliedByEmail || {}).map(([k, v]) => [
-            String(k).trim().toLowerCase(),
-            v,
-          ]),
-        );
+function unappliedMap(unappliedByEmail) {
+  if (unappliedByEmail instanceof Map) return unappliedByEmail;
+  return new Map(
+    Object.entries(unappliedByEmail || {}).map(([k, v]) => [
+      String(k).trim().toLowerCase(),
+      v,
+    ]),
+  );
+}
 
-  await ensureTabs(sheets, id);
+/**
+ * Merge queue + current Review + unapplied copilot_db into one row per email.
+ * Later duplicate sheet rows win (same as apply's high-row-first skip).
+ */
+function socialOnlySet(socialOnlyEmails) {
+  if (socialOnlyEmails instanceof Set) return socialOnlyEmails;
+  return new Set(
+    [...(socialOnlyEmails || [])]
+      .map((email) => String(email || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
 
-  const existingRes = await sheets.spreadsheets.values.get({
-    spreadsheetId: id,
-    range: `'${tab}'!A:${lastCol()}`,
-  });
-  const existingValues = existingRes.data.values || [];
-  const { rows: reviewRows } = parseSheetRows(existingValues);
+function keepSocialOnlyHold({ notes, decision } = {}) {
+  if (isOffboardLikeDecision(decision)) return true;
+  const text = String(notes || "").toLowerCase();
+  return (
+    text.includes("payment method nudge") ||
+    text.includes(APPLY_FAILED_PREFIX)
+  );
+}
 
-  await ensureDropdowns(sheets, id);
-
-  const byEmail = new Map(reviewRows.map((r) => [r.email, r]));
+export function buildReviewRows(
+  queueRows,
+  reviewRows,
+  unappliedByEmail,
+  { socialOnlyEmails } = {},
+) {
+  const unapplied = unappliedMap(unappliedByEmail);
+  const socialOnly = socialOnlySet(socialOnlyEmails);
+  const byEmail = new Map();
+  const duplicates = [];
+  for (const r of reviewRows || []) {
+    if (!r.email) continue;
+    const prev = byEmail.get(r.email);
+    if (prev) {
+      duplicates.push({
+        email: r.email,
+        keptRow: r.rowNumber,
+        droppedRow: prev.rowNumber,
+        keptDecision: parseDecision(r.cells[COL.decision]),
+        droppedDecision: parseDecision(prev.cells[COL.decision]),
+      });
+    }
+    byEmail.set(r.email, r);
+  }
 
   function mergePreserved(next, found) {
     let merged = [...next];
     if (found) {
       for (const i of PRESERVED_COLS) {
+        if (i === COL.decision && parseDecision(found.cells[i]) === "social") {
+          continue;
+        }
         if (cellFilled(found.cells[i])) merged[i] = found.cells[i];
       }
       if (parseDecision(found.cells[COL.decision]) === "update") {
@@ -927,7 +1260,7 @@ export async function appendReviewQueue(queueRows, { unappliedByEmail } = {}) {
   let appended = 0;
   let carried = 0;
 
-  for (const rec of queueRows) {
+  for (const rec of queueRows || []) {
     const next = rowFromQueue(rec);
     const email = next[COL.email];
     if (!email || seen.has(email)) continue;
@@ -939,9 +1272,19 @@ export async function appendReviewQueue(queueRows, { unappliedByEmail } = {}) {
     seen.add(email);
   }
 
-  for (const existing of reviewRows) {
+  for (const existing of byEmail.values()) {
     if (!existing.email || seen.has(existing.email)) continue;
     if (!isManualReviewDecision(existing.cells[COL.decision])) continue;
+    if (parseDecision(existing.cells[COL.decision]) === "social") continue;
+    if (
+      socialOnly.has(existing.email) &&
+      !keepSocialOnlyHold({
+        notes: existing.cells[COL.decisionNotes],
+        decision: existing.cells[COL.decision],
+      })
+    ) {
+      continue;
+    }
     rebuilt.push(
       overlayUnappliedDecision(
         padReviewCells(existing.cells),
@@ -955,22 +1298,80 @@ export async function appendReviewQueue(queueRows, { unappliedByEmail } = {}) {
   for (const [email, rec] of unapplied) {
     if (!email || seen.has(email)) continue;
     if (parseDecision(rec?.decision) === "update") continue;
+    if (parseDecision(rec?.decision) === "social") continue;
     if (!isManualReviewDecision(rec?.decision)) continue;
+    if (
+      socialOnly.has(email) &&
+      !keepSocialOnlyHold({
+        notes: rec?.decision_notes,
+        decision: rec?.decision,
+      })
+    ) {
+      continue;
+    }
     rebuilt.push(rowFromUnapplied(rec));
     seen.add(email);
     carried++;
   }
 
   rebuilt.sort(compareReviewRows);
-  await writeReviewRows(sheets, id, tab, rebuilt);
-  await ensureDropdowns(sheets, id);
-
   return {
+    rebuilt: rebuilt.map(withOffboardHoldNotes),
     appended,
     skipped,
     carried,
     total: rebuilt.length,
-    rebuilt: true,
+    duplicates,
+  };
+}
+
+export async function appendReviewQueue(
+  queueRows,
+  { unappliedByEmail, dryRun = false, socialOnlyEmails } = {},
+) {
+  const sheets = getSheetsClient();
+  const id = sheetId();
+  const tab = reviewTab();
+
+  await ensureTabs(sheets, id);
+
+  const existingRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: id,
+    range: `'${tab}'!A:${lastCol()}`,
+  });
+  const existingValues = existingRes.data.values || [];
+  const { rows: reviewRows } = parseSheetRows(existingValues);
+  const built = buildReviewRows(queueRows, reviewRows, unappliedByEmail, {
+    socialOnlyEmails,
+  });
+
+  for (const dup of built.duplicates) {
+    const diff =
+      dup.keptDecision &&
+      dup.droppedDecision &&
+      dup.keptDecision !== dup.droppedDecision
+        ? ` (${dup.keptDecision}, dropping ${dup.droppedDecision} on row ${dup.droppedRow})`
+        : ` (dropping row ${dup.droppedRow})`;
+    console.warn(
+      `   ⚠️  duplicate Review rows for ${dup.email} — keeping row ${dup.keptRow}${diff}`,
+    );
+  }
+
+  if (!dryRun) {
+    await ensureDropdowns(sheets, id);
+    await writeReviewRows(sheets, id, tab, built.rebuilt);
+    await ensureDropdowns(sheets, id);
+    await formatReviewHoldRows(sheets, id, built.rebuilt);
+  }
+
+  return {
+    appended: built.appended,
+    skipped: built.skipped,
+    carried: built.carried,
+    total: built.total,
+    rebuilt: !dryRun,
+    rows: built.rebuilt,
+    duplicates: built.duplicates,
   };
 }
 
@@ -1007,7 +1408,7 @@ function overlayUnappliedDecision(merged, unapplied) {
   if (!unapplied) return merged;
   const out = [...merged];
   const fromBq = sheetDecisionValue(unapplied.decision);
-  if (!cellFilled(out[COL.decision]) && fromBq) {
+  if (!cellFilled(out[COL.decision]) && fromBq && fromBq !== "social") {
     out[COL.decision] = fromBq;
   }
   if (
@@ -1045,11 +1446,17 @@ export function withApplyFailedNote(existing, message) {
   return appendDecisionNote(kept, `${APPLY_FAILED_PREFIX} ${detail}`);
 }
 
+export function hasPaymentNudgeNote(existing) {
+  return String(existing || "")
+    .toLowerCase()
+    .includes("payment method nudge");
+}
+
 /** Keep ops notes; add the hold marker if it is not already there. */
 export function withPaymentNudgeNote(existing) {
   const cur = String(existing || "").trim();
   if (!cur) return PAYMENT_NUDGE_NOTE;
-  if (cur.toLowerCase().includes("payment method nudge")) return cur;
+  if (hasPaymentNudgeNote(cur)) return cur;
   return `${cur}; ${PAYMENT_NUDGE_NOTE}`;
 }
 
@@ -1063,10 +1470,16 @@ export async function patchReviewDecisionNotes(email, notes) {
   const found = rows.find((r) => r.email === key);
   if (!found) return false;
   const sheets = getSheetsClient();
+  const id = sheetId();
+  const tab = reviewTab();
+  await ensureGridSize(sheets, id, tab, {
+    rows: Math.max(found.rowNumber, 2),
+    columns: REVIEW_HEADERS.length,
+  });
   const col = colLetter(COL.decisionNotes);
   await sheets.spreadsheets.values.update({
-    spreadsheetId: sheetId(),
-    range: `'${reviewTab()}'!${col}${found.rowNumber}`,
+    spreadsheetId: id,
+    range: `'${tab}'!${col}${found.rowNumber}`,
     valueInputOption: "RAW",
     requestBody: { values: [[notes]] },
   });
@@ -1104,30 +1517,49 @@ export async function listSalesWritebacks(queueRows) {
   return patches;
 }
 
+function readyDecisionFromReviewRow(r) {
+  return {
+    rowNumber: r.rowNumber,
+    email: r.email,
+    decision: parseDecision(r.cells[COL.decision]),
+    decisionNotes: String(r.cells[COL.decisionNotes] || "").trim(),
+    freezeUntil: String(r.cells[COL.freezeUntil] || "").trim(),
+    newEmail: String(r.cells[COL.newEmail] || "").trim().toLowerCase(),
+    mtEmail: String(r.cells[COL.mtEmail] || "").trim().toLowerCase(),
+    promoCode: String(r.cells[COL.promoCode] || "").trim(),
+    igHandle: String(r.cells[COL.igHandle] || "").trim(),
+    igUrl: String(r.cells[COL.igUrl] || "").trim(),
+    firstName: String(r.cells[COL.firstName] || "").trim(),
+    lastName: String(r.cells[COL.lastName] || "").trim(),
+    daysToExpiry: parseDaysToExpiry(r.cells[COL.daysToExpiry]),
+    bbSales: parseMoney(r.cells[COL.bbSales]),
+    hybridSales: parseMoney(r.cells[COL.hybridSales]),
+    newHybridSales: parseMoney(r.cells[COL.newHybridSales]),
+    cells: r.cells,
+  };
+}
+
 /** Review rows with a valid decision (not yet applied). */
 export async function listReadyDecisionsFromSheet() {
   const { rows } = await readTab(reviewTab());
   return rows
     .filter((r) => parseDecision(r.cells[COL.decision]))
-    .map((r) => ({
-      rowNumber: r.rowNumber,
-      email: r.email,
-      decision: parseDecision(r.cells[COL.decision]),
-      decisionNotes: String(r.cells[COL.decisionNotes] || "").trim(),
-      freezeUntil: String(r.cells[COL.freezeUntil] || "").trim(),
-      newEmail: String(r.cells[COL.newEmail] || "").trim().toLowerCase(),
-      mtEmail: String(r.cells[COL.mtEmail] || "").trim().toLowerCase(),
-      promoCode: String(r.cells[COL.promoCode] || "").trim(),
-      igHandle: String(r.cells[COL.igHandle] || "").trim(),
-      igUrl: String(r.cells[COL.igUrl] || "").trim(),
-      firstName: String(r.cells[COL.firstName] || "").trim(),
-      lastName: String(r.cells[COL.lastName] || "").trim(),
-      daysToExpiry: parseDaysToExpiry(r.cells[COL.daysToExpiry]),
-      bbSales: parseMoney(r.cells[COL.bbSales]),
-      hybridSales: parseMoney(r.cells[COL.hybridSales]),
-      newHybridSales: parseMoney(r.cells[COL.newHybridSales]),
-      cells: r.cells,
-    }));
+    .map(readyDecisionFromReviewRow);
+}
+
+/** Same mapping from rebuilt cell rows (header is row 1, data starts at 2). */
+export function readyDecisionsFromReviewCells(cellRows) {
+  return (cellRows || [])
+    .map((cells, i) =>
+      readyDecisionFromReviewRow({
+        rowNumber: i + 2,
+        email: String(cells?.[COL.email] || "")
+          .trim()
+          .toLowerCase(),
+        cells: cells || [],
+      }),
+    )
+    .filter((r) => r.email && r.decision);
 }
 
 export async function markSheetApplied({ rowNumber }) {

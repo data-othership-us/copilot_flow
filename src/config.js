@@ -41,7 +41,7 @@ export const config = {
   reevaluateAccepted: envBool("REEVALUATE_ACCEPTED", false),
   /** Rebuild Review / Add to Modash without ingesting or applying filled decisions. */
   evaluateSkipApply: envBool("EVALUATE_SKIP_APPLY", false),
-  /** Comma-separated emails: apply (or dry-run) only these Review rows. */
+  /** Comma-separated emails: apply (or dry-run) only these people; still rebuild Review / Modash. */
   evaluateEmails: env("EVALUATE_EMAILS", "")
     .split(",")
     .map((s) => s.trim().toLowerCase())
@@ -177,8 +177,6 @@ export const config = {
   /** Min scraped followers for 🟢 / 🟡 / 🔴 page icons */
   qualifiedMinFollowers: envInt("QUALIFIED_MIN_FOLLOWERS", 1500),
 
-  /** Days between Review-tab payment-method nudges (onboard / renew / upgrade / downgrade) */
-  nudgeCooldownDays: envInt("NUDGE_COOLDOWN_DAYS", 3),
   /**
    * Only inspect Onboarded cards edited in this many days when moving
    * incomplete Onboarded cards back to Evaluated (0 = scan every Onboarded card).

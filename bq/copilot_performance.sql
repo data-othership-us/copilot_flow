@@ -527,6 +527,7 @@ SELECT
   e.decision_notes,
   e.decision_at,
   e.decision_applied_at,
+  e.onboarded_at,
   e.freeze_until,
   e.user_id,
   e.mt_email,

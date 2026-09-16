@@ -14,6 +14,7 @@ import {
 } from "../email/gmailSend.js";
 import { getEmailSignatureHtml } from "../email/signature.js";
 import { htmlToPreview } from "../email/htmlToPreview.js";
+import { hasPaymentNudgeNote } from "../sheets/evaluationSheet.js";
 
 const emailsDir = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -63,11 +64,10 @@ export function coerceTimestamp(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-export function isPaymentNudgeOnCooldown(row) {
-  const last = coerceTimestamp(row?.payment_nudge_at);
-  if (!last) return false;
-  const days = Number(config.nudgeCooldownDays) || 3;
-  return Date.now() - last.getTime() < days * 24 * 60 * 60 * 1000;
+/** True once a payment-method nudge has gone out (timestamp or Review notes). */
+export function hasPaymentNudgeBeenSent(row) {
+  if (coerceTimestamp(row?.payment_nudge_at)) return true;
+  return hasPaymentNudgeNote(row?.decision_notes);
 }
 
 export function isPaymentNudgeHold(result) {

@@ -14,7 +14,8 @@
 --   4. Or there is no live Co-Pilot membership (no Co-Pilot-named instance
 --      in active / pending / payment_failure — includes gym-only, ended,
 --      cancelled, frozen, or missing). They stay until a live Co-Pilot
---      term exists or ops marks them inactive.
+--      term exists or ops marks them inactive. Copilots with onboarded_at
+--      within the past 48 hours are excluded (MT pipeline lag grace period).
 -- membership_end / days_to_expiry come from copilot_performance (MT
 -- calculated_end_at / scheduled_end_at / end_date / cancelled_at).
 --
@@ -78,6 +79,7 @@ WITH queued AS (
     p.decision,
     p.decision_at,
     p.decision_applied_at,
+    p.onboarded_at,
     p.freeze_until
   FROM `YOUR_PROJECT.copilots.copilot_performance` AS p
   WHERE LOWER(IFNULL(p.status, '')) = 'active'
@@ -152,6 +154,12 @@ WHERE (
     OR ig_resubmit
     OR no_mt_account
     OR no_live_copilot
+  )
+  -- Recently onboarded copilots without a live membership yet: pipeline lag.
+  AND NOT (
+    no_live_copilot
+    AND onboarded_at IS NOT NULL
+    AND onboarded_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
   )
   AND NOT (
     LOWER(IFNULL(decision, '')) = 'snooze'

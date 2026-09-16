@@ -35,9 +35,8 @@ import {
 import { igProfileUrl, storedIgHandle } from "../instagram.js";
 import { buildOfferLink } from "../offerLink.js";
 import { listTakenPromoCodes } from "../onboard/existingPromo.js";
-import { config } from "../../config.js";
 import {
-  isPaymentNudgeOnCooldown,
+  hasPaymentNudgeBeenSent,
   sendPaymentMethodNudge,
   coerceTimestamp,
 } from "../nudge/paymentMethodNudge.js";
@@ -85,7 +84,7 @@ function emailFields(row, extra = {}) {
 /** Send after MT side-effects. Live apply fails (and retries later) if mail does not go out. */
 async function notifyCopilot(row, kind, extra = {}) {
   const dryRun = Boolean(extra.dryRun);
-  const cycleKinds = new Set(["renewal", "upgrade", "downgrade"]);
+  const cycleKinds = new Set(["renewal", "upgrade", "downgrade", "offboard"]);
   const cycle =
     cycleKinds.has(kind) && extra.cyclePoints == null
       ? await getCopilotCycleStats(row.contact_email)
@@ -198,15 +197,13 @@ async function holdForPaymentMethod(row, { dryRun, decision }) {
     `   🚧 No valid payment method on file — holding ${decision} until a card is added`
   );
 
-  if (!dryRun && isPaymentNudgeOnCooldown(row)) {
-    const days = Number(config.nudgeCooldownDays) || 3;
+  if (hasPaymentNudgeBeenSent(row)) {
     const last = coerceTimestamp(row.payment_nudge_at);
     console.log(
-      `   ⏭️  Payment nudge cooldown (${days}d)` +
-        `${last ? ` — last sent ${last.toISOString()}` : ""}`
+      "   ⏭️  payment nudge already sent" +
+        `${last ? ` ${last.toISOString()}` : ""} — keep Review row`
     );
-    await stampPaymentNudgeNote(row);
-    return "nudged_payment_method:cooldown";
+    return "nudged_payment_method:already_sent";
   }
 
   const result = await sendPaymentMethodNudge({
@@ -555,7 +552,7 @@ async function applySocial(row, { dryRun }) {
   const notes = withResubmitHandlesEmailedNote(existing);
 
   if (alreadySent) {
-    console.log("   ⏭️  social nudge already sent — keep Review row");
+    console.log("   ⏭️  social nudge already sent — waiting on a public handle");
     return "nudged_social:already_sent";
   }
 
@@ -582,15 +579,21 @@ async function applySocial(row, { dryRun }) {
   if (!result?.sent) return "nudged_social";
 
   row.decision_notes = notes;
-  await updateCopilotByEmail(row.contact_email, {
-    decision_notes: notes,
-  });
-  const patched = await patchReviewDecisionNotes(row.contact_email, notes);
-  if (patched) {
-    console.log(`   📝 Review notes: ${notes}`);
-  } else {
+  try {
+    await updateCopilotByEmail(row.contact_email, {
+      decision_notes: notes,
+    });
+    const patched = await patchReviewDecisionNotes(row.contact_email, notes);
+    if (patched) {
+      console.log(`   📝 Review notes: ${notes}`);
+    } else {
+      console.warn(
+        `   ⚠️  Review row not found to stamp notes for ${row.contact_email}`
+      );
+    }
+  } catch (error) {
     console.warn(
-      `   ⚠️  Review row not found to stamp notes for ${row.contact_email}`
+      `   ⚠️  social email sent but could not stamp notes: ${error.message}`
     );
   }
   return "nudged_social";
@@ -656,9 +659,9 @@ async function applyUpdate(row, { dryRun, patch = {} }) {
   }
 
   if (!changes.length) {
-    throw new Error(
-      "update: fill new_email, mt_email, promo_code, and/or ig_handle with a value that differs from copilot_db",
-    );
+    console.log("   ⏭️  All update fields already match copilot_db — nothing to change");
+    await updateCopilotByEmail(lookupEmail, { decision_applied_at: "NOW" });
+    return "updated:no_changes";
   }
 
   if (dryRun) {

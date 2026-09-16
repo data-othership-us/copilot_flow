@@ -235,6 +235,9 @@ function renderLifecycleHtml(kind, input) {
     breathworkCommunityLink: linkOrPlaceholder(
       config.copilotLinks?.breathworkCommunityUrl
     ),
+    applyUrl: escapeHtml(
+      String(config.copilotLinks?.applyUrl || "").trim()
+    ),
     signatureHtml: getEmailSignatureHtml({
       includeApplyLine: kind !== "offboard",
     }),

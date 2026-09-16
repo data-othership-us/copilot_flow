@@ -19,11 +19,18 @@ import {
 import { storedIgHandle } from "../lib/instagram.js";
 import {
   appendReviewQueue,
+  collectSocialOutliers,
+  ensureReviewSheetLayout,
   freezeUntilDateString,
-  listReadyDecisionsFromSheet,
+  hasResubmitHandlesEmailedNote,
+  isMembershipReviewRow,
+  isOffboardLikeDecision,
+  listReviewSheetRows,
   listSalesWritebacks,
   markSheetApplied,
   patchReviewDecisionNotes,
+  readyDecisionsFromReviewCells,
+  reviewRowDecision,
   shouldHoldUntilExpiry,
   withApplyFailedNote,
   writeAddToModashQueue,
@@ -182,7 +189,7 @@ async function applyReadyItems(items, summary, attempted) {
 
       if (isSocialNudgeHold(result)) {
         console.log(
-          `   📸 ${result} — Review row kept until they resubmit a public handle`
+          `   📸 ${result} — waiting on a public handle (Modash outliers)`,
         );
         summary.socialNudged++;
         continue;
@@ -247,6 +254,7 @@ export async function evaluateCopilots() {
     sheetAppended: 0,
     sheetSkipped: 0,
     addToModash: 0,
+    socialOutliers: 0,
     salesUpdated: 0,
     decisionsIngested: 0,
     applied: 0,
@@ -267,115 +275,231 @@ export async function evaluateCopilots() {
   }
   if (emailsOnly) {
     console.log(
-      `   EVALUATE_EMAILS — ${emails.join(", ")} (skip queue rebuild / Add to Modash)`,
+      `   EVALUATE_EMAILS — ${emails.join(", ")} (rebuild Review / Modash; apply only these)`,
     );
   }
 
   if (!config.dryRun) {
     await ensureCopilotDbColumns();
-    if (!emailsOnly) {
-      await applySheetUnionViews();
-    }
+    await ensureReviewSheetLayout();
+    await applySheetUnionViews();
   }
 
   const attempted = new Set();
 
-  if (!emailsOnly) {
-    console.log("\n📋 Evaluation queue (copilot_evaluation_queue)");
-    const queue = await listEvaluationQueue();
-    summary.queued = queue.length;
+  console.log("\n📋 Evaluation queue (copilot_evaluation_queue)");
+  const queue = await listEvaluationQueue();
+  const { rows: reviewRows } = await listReviewSheetRows();
+  const unappliedRows = await listUnappliedDecisions();
+  const offboardHoldEmails = new Set();
+  for (const r of reviewRows) {
+    if (isOffboardLikeDecision(reviewRowDecision(r))) {
+      offboardHoldEmails.add(r.email);
+    }
+  }
+  for (const r of unappliedRows) {
+    if (!isOffboardLikeDecision(r.decision)) continue;
+    const email = String(r.contact_email || "")
+      .trim()
+      .toLowerCase();
+    if (email) offboardHoldEmails.add(email);
+  }
+  const membershipQueue = queue.filter((r) => {
+    const email = String(r.contact_email || "")
+      .trim()
+      .toLowerCase();
+    return isMembershipReviewRow(r) || offboardHoldEmails.has(email);
+  });
+  const socialOnlyEmails = queue
+    .filter((r) => {
+      const email = String(r.contact_email || "")
+        .trim()
+        .toLowerCase();
+      return !isMembershipReviewRow(r) && !offboardHoldEmails.has(email);
+    })
+    .map((r) =>
+      String(r.contact_email || "")
+        .trim()
+        .toLowerCase(),
+    )
+    .filter(Boolean);
+  const inQueue = queueEmailSet(membershipQueue);
+  summary.queued = queue.length;
+  console.log(
+    `   ${queue.length} in queue; ${membershipQueue.length} membership Review; ${socialOnlyEmails.length} social-only → Modash outliers` +
+      (offboardHoldEmails.size
+        ? `; keep ${offboardHoldEmails.size} offboard until end of term`
+        : ""),
+  );
+
+  const unappliedByEmail = new Map(
+    unappliedRows
+      .map((r) => [
+        String(r.contact_email || "")
+          .trim()
+          .toLowerCase(),
+        r,
+      ])
+      .filter(([email]) => email),
+  );
+
+  const outliers = collectSocialOutliers({
+    queue,
+    reviewRows,
+    unappliedRows,
+  });
+  summary.socialOutliers = outliers.length;
+
+  if (!skipApply && outliers.length) {
+    console.log(`\n📸 Social outliers (${outliers.length})`);
+    const want = emails.length ? new Set(emails) : null;
+    for (const rec of outliers) {
+      const email = String(rec.contact_email || rec.email || "")
+        .trim()
+        .toLowerCase();
+      if (!email) continue;
+      if (want && !want.has(email)) continue;
+      if (attempted.has(email)) continue;
+      const copilot = await getCopilotByEmail(email);
+      if (!copilot) {
+        console.warn(`   ⚠️  ${email} — not in copilot_db`);
+        continue;
+      }
+      const filledDecision =
+        rec.decision || copilot.decision || "";
+      if (isOffboardLikeDecision(filledDecision)) {
+        console.log(`   ⏭️  ${email} — ${filledDecision}, skip social nudge`);
+        continue;
+      }
+      const notes =
+        rec.decision_notes || rec.decisionNotes || copilot.decision_notes;
+      const already =
+        hasResubmitHandlesEmailedNote(notes) ||
+        hasResubmitHandlesEmailedNote(copilot.decision_notes);
+      if (already) {
+        rec.decision_notes =
+          notes && hasResubmitHandlesEmailedNote(notes)
+            ? notes
+            : copilot.decision_notes || notes;
+        console.log(`   ⏭️  ${email} — social email already sent`);
+        continue;
+      }
+      attempted.add(email);
+      copilot.decision = "social";
+      copilot.decision_notes = notes;
+      console.log(`\n—— Social outlier: ${email} ——`);
+      try {
+        const result = await applyCopilotDecision(copilot, {
+          dryRun: config.dryRun,
+        });
+        if (isSocialNudgeHold(result)) {
+          summary.socialNudged++;
+          rec.decision_notes = copilot.decision_notes || rec.decision_notes;
+        }
+      } catch (error) {
+        summary.applyFailed++;
+        console.warn(`   ⚠️  ${error.message}`);
+      }
+      await sleep(config.requestDelayMs);
+    }
+  }
+
+  if (config.dryRun) {
     console.log(
-      `   ${queue.length} copilot(s) expiring within 7 days, re-submit IG, no MT account, or no live Co-Pilot membership`,
+      "\n   (DRY_RUN: planning Review rebuild in memory; no sheet write)",
     );
-    const inQueue = queueEmailSet(queue);
+  }
+  const written = await appendReviewQueue(membershipQueue, {
+    unappliedByEmail,
+    dryRun: config.dryRun,
+    socialOnlyEmails,
+  });
+  const rebuiltCells = written.rows;
+  summary.sheetAppended = written.appended;
+  summary.sheetSkipped = written.skipped;
+  summary.sheetRebuilt = written.rebuilt ? 1 : 0;
+  console.log(
+    `   ${config.dryRun ? "Would rebuild" : "✅ Review tab —"} ${written.total} row(s), needs-decision first (soonest expiry), grey nudge/pending at bottom` +
+      (written.appended ? ` (${written.appended} new)` : "") +
+      (written.carried
+        ? `; keep ${written.carried} unapplied off-queue row(s)`
+        : ""),
+  );
+  for (const r of membershipQueue.slice(0, 15)) {
+    console.log(
+      `   · ${r.contact_email}  end=${r.membership_end || "?"}  days=${r.days_to_expiry}`,
+    );
+  }
+  if (membershipQueue.length > 15) {
+    console.log(`   · … +${membershipQueue.length - 15} more`);
+  }
 
-    if (!skipApply) {
-      const readyBefore = await listReadyDecisionsFromSheet();
-      const manual = filterReady(readyBefore, emails)
-        .filter((r) => !inQueue.has(r.email))
-        .map((r) => ({ ...r, manual: true }));
-      console.log("\n📥 Manual Review rows (not in queue)");
-      if (!manual.length) {
-        console.log("   none");
-      } else {
-        console.log(`   ${manual.length} off-queue row(s) with a filled decision`);
-        await applyReadyItems(manual, summary, attempted);
-      }
+  if (!config.dryRun && !skipApply) {
+    const salesPatches = await listSalesWritebacks(membershipQueue);
+    for (const patch of salesPatches) {
+      await updateCopilotByEmail(patch.email, patch.fields);
+      summary.salesUpdated++;
     }
-
-    if (config.dryRun) {
+    if (salesPatches.length) {
       console.log(
-        "\n   (DRY_RUN: would rebuild Review from the queue; keep unapplied decision / notes / sales cells)",
-      );
-      for (const r of queue.slice(0, 15)) {
-        console.log(
-          `   · ${r.contact_email}  end=${r.membership_end || "?"}  days=${r.days_to_expiry}`,
-        );
-      }
-      if (queue.length > 15) {
-        console.log(`   · … +${queue.length - 15} more`);
-      }
-    } else {
-      const unappliedRows = await listUnappliedDecisions();
-      const unappliedByEmail = new Map(
-        unappliedRows.map((r) => [
-          String(r.contact_email || "").trim().toLowerCase(),
-          r,
-        ]).filter(([email]) => email)
-      );
-      const written = await appendReviewQueue(queue, { unappliedByEmail });
-      summary.sheetAppended = written.appended;
-      summary.sheetSkipped = written.skipped;
-      summary.sheetRebuilt = written.rebuilt ? 1 : 0;
-      console.log(
-        `   ✅ Review tab — ${written.total} row(s), holds at bottom, then region / tier / days to expiry` +
-          (written.appended ? ` (${written.appended} new)` : "") +
-          (written.carried
-            ? `; kept ${written.carried} unapplied off-queue row(s)`
-            : ""),
-      );
-      if (!skipApply) {
-        const salesPatches = await listSalesWritebacks(queue);
-        for (const patch of salesPatches) {
-          await updateCopilotByEmail(patch.email, patch.fields);
-          summary.salesUpdated++;
-        }
-        if (salesPatches.length) {
-          console.log(
-            `   ✅ Wrote ${salesPatches.length} bb_sales / hybrid_sales / new_hybrid_sales update(s) to copilot_db`,
-          );
-        }
-      }
-    }
-
-    console.log("\n📣 Add to Modash (handles missing from modash_creators)");
-    const missingModash = await listAddToModash();
-    summary.addToModash = missingModash.length;
-    if (config.dryRun) {
-      console.log(
-        `   (DRY_RUN: would write ${missingModash.length} row(s) to Add to Modash)`,
-      );
-      for (const r of missingModash.slice(0, 15)) {
-        console.log(
-          `   · ${r.contact_email}  ${storedIgHandle(r.ig_handle || r.ig_url) || r.ig_handle || "?"}  ${r.region || "?"} / ${r.tier || "?"}`,
-        );
-      }
-      if (missingModash.length > 15) {
-        console.log(`   · … +${missingModash.length - 15} more`);
-      }
-    } else {
-      const written = await writeAddToModashQueue(missingModash);
-      console.log(
-        `   ✅ Add to Modash tab — ${written.total} handle(s) not in modash_creators`,
+        `   ✅ Wrote ${salesPatches.length} bb_sales / hybrid_sales / new_hybrid_sales update(s) to copilot_db`,
       );
     }
+  }
+
+  console.log("\n📣 Add to Modash (paste-ready + social outliers)");
+  const missingModash = await listAddToModash();
+  if (config.dryRun) {
+    const outlierEmails = new Set(
+      outliers.map((o) =>
+        String(o.contact_email || o.email || "")
+          .trim()
+          .toLowerCase(),
+      ),
+    );
+    const addPreview = missingModash.filter((r) => {
+      const email = String(r.contact_email || "")
+        .trim()
+        .toLowerCase();
+      return email && !outlierEmails.has(email);
+    });
+    summary.addToModash = addPreview.length;
+    console.log(
+      `   (DRY_RUN: would write ${addPreview.length} add row(s) + ${outliers.length} outlier(s))`,
+    );
+    for (const r of addPreview.slice(0, 10)) {
+      console.log(
+        `   · add ${r.contact_email}  ${storedIgHandle(r.ig_handle || r.ig_url) || r.ig_handle || "?"}`,
+      );
+    }
+    for (const r of outliers.slice(0, 10)) {
+      console.log(
+        `   · outlier ${r.contact_email}  ${r.ig_handle || "re-submit"}`,
+      );
+    }
+  } else {
+    const writtenModash = await writeAddToModashQueue(missingModash, {
+      outliers,
+    });
+    summary.addToModash = writtenModash.added;
+    summary.socialOutliers = writtenModash.outliers;
+    console.log(
+      `   ✅ Add to Modash — ${writtenModash.added} add (paste ig_handle); ${writtenModash.outliers} social outlier(s)`,
+    );
   }
 
   console.log("\n📥 Ingest + apply sheet decisions");
   if (skipApply) {
     console.log("   ⏭️  Skip apply — filled Review decisions left as-is");
   }
-  const ready = skipApply ? [] : await listReadyDecisionsFromSheet();
+  const ready = skipApply
+    ? []
+    : readyDecisionsFromReviewCells(rebuiltCells || [])
+        .filter((r) => r.decision !== "social")
+        .map((r) => ({
+          ...r,
+          manual: !inQueue.has(r.email),
+        }));
   const filtered = skipApply ? [] : filterReady(ready, emails);
   if (!skipApply) {
     if (emailsOnly) {
@@ -383,10 +507,10 @@ export async function evaluateCopilots() {
         `   ${filtered.length} of ${ready.length} filled decision(s) match EVALUATE_EMAILS`,
       );
     } else {
-      const remaining = filtered.filter((r) => !attempted.has(r.email)).length;
+      const offQueue = filtered.filter((r) => r.manual).length;
       console.log(
-        `   ${remaining} queue row(s) with a filled decision` +
-          (attempted.size ? ` (${attempted.size} manual already attempted)` : ""),
+        `   ${filtered.length} filled decision(s)` +
+          (offQueue ? ` (${offQueue} off-queue)` : ""),
       );
     }
     await applyReadyItems(filtered, summary, attempted);
@@ -399,6 +523,7 @@ export async function evaluateCopilots() {
   console.log(`   Sheet appended: ${summary.sheetAppended}`);
   console.log(`   Already on Review: ${summary.sheetSkipped}`);
   console.log(`   Add to Modash: ${summary.addToModash}`);
+  console.log(`   Social outliers: ${summary.socialOutliers ?? 0}`);
   console.log(`   Sales fields updated: ${summary.salesUpdated}`);
   console.log(`   Decisions ingested: ${summary.decisionsIngested}`);
   console.log(`   Applied: ${summary.applied}`);
