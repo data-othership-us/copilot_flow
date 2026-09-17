@@ -501,6 +501,7 @@ export async function getCopilotCycleStats(email) {
 }
 
 /** Filled decisions that still need apply (never applied, or a newer decision_at). */
+export async function listUnappliedDecisions() {
   const bigquery = getBigQueryClient();
   const [rows] = await bigquery.query({
     query: `
