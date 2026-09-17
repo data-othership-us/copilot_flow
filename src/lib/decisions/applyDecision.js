@@ -1,3 +1,4 @@
+import { config } from "../../config.js";
 import { sendLifecycleEmail, formatExpirationDate } from "../email/lifecycleEmail.js";
 import {
   deactivateCopilotDiscount,
@@ -33,6 +34,7 @@ import {
   isPaymentMethodError,
 } from "../mt/bankcards.js";
 import { igProfileUrl, storedIgHandle } from "../instagram.js";
+import { findMtUserByEmail } from "../mt/copilotUserLookup.js";
 import { buildOfferLink } from "../offerLink.js";
 import { listTakenPromoCodes } from "../onboard/existingPromo.js";
 import {
@@ -540,6 +542,47 @@ function fieldEmail(value) {
     .toLowerCase();
 }
 
+function mtProfileLink(userId) {
+  if (!userId) return null;
+  return `https://${config.mt.tenantHost}/admin/user/profile/${userId}`;
+}
+
+/** Use the MT account for mt_email (else contact_email) before membership/payment. */
+async function syncMtUserFromEmail(row, { dryRun = false } = {}) {
+  const lookupEmail = fieldEmail(row.mt_email) || fieldEmail(row.contact_email);
+  if (!lookupEmail || !config.mt.baseUrl || !config.mt.apiKey) return;
+  const user = await findMtUserByEmail(
+    config.mt.baseUrl,
+    config.mt.apiKey,
+    lookupEmail,
+  );
+  if (!user?.id) {
+    console.warn(
+      `   ⚠️  no MT user for ${lookupEmail} — keeping user_id=${row.user_id || "?"}`,
+    );
+    return;
+  }
+  const userId = String(user.id);
+  const mtEmail = fieldEmail(user.attributes?.email) || lookupEmail;
+  if (
+    userId === String(row.user_id || "") &&
+    mtEmail === fieldEmail(row.mt_email)
+  ) {
+    return;
+  }
+  console.log(
+    `   🔄 MT account ${row.user_id || "(none)"} → ${userId} (${mtEmail})`,
+  );
+  row.user_id = userId;
+  row.mt_email = mtEmail;
+  if (dryRun) return;
+  await updateCopilotByEmail(fieldEmail(row.contact_email), {
+    user_id: userId,
+    mt_email: mtEmail,
+    mt_profile_link: mtProfileLink(userId),
+  });
+}
+
 function namesEqual(a, b) {
   return String(a || "").trim() === String(b || "").trim();
 }
@@ -629,6 +672,20 @@ async function applyUpdate(row, { dryRun, patch = {} }) {
   if (mtEmail && mtEmail !== fieldEmail(row.mt_email)) {
     fields.mt_email = mtEmail;
     changes.push(`mt_email ${fieldEmail(row.mt_email) || "(none)"} → ${mtEmail}`);
+    const user = await findMtUserByEmail(
+      config.mt.baseUrl,
+      config.mt.apiKey,
+      mtEmail,
+    );
+    if (!user?.id) {
+      throw new Error(`no MT user for mt_email: ${mtEmail}`);
+    }
+    const userId = String(user.id);
+    if (userId !== String(row.user_id || "")) {
+      fields.user_id = userId;
+      fields.mt_profile_link = mtProfileLink(userId);
+      changes.push(`user_id ${row.user_id || "(none)"} → ${userId}`);
+    }
   }
 
   const igRaw = String(patch.igHandle || patch.igUrl || "").trim();
@@ -702,6 +759,10 @@ export async function applyCopilotDecision(row, { dryRun = false, freezeUntil = 
   const decision = String(row.decision || "")
     .trim()
     .toLowerCase();
+  const needsMtAccount = ["onboard", "renew", "upgrade", "downgrade", "freeze"].includes(
+    decision,
+  );
+  if (needsMtAccount) await syncMtUserFromEmail(row, { dryRun });
   const userId = row.user_id;
 
   if (
