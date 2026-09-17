@@ -178,7 +178,8 @@ export function hasLiveCopilotMembership(r) {
 
 /**
  * Membership work for Review: no MT account, no live Co-Pilot term, payment
- * failure, or a live Co-Pilot term within 7 days of ending.
+ * failure, or a live Co-Pilot term within 7 days of ending. Frozen terms
+ * stay off Review until they unfreeze.
  */
 export function isMembershipReviewRow(r) {
   if (isMissingMtAccountRow(r)) return true;
@@ -186,6 +187,7 @@ export function isMembershipReviewRow(r) {
     .trim()
     .toLowerCase();
   if (status === "payment_failure") return true;
+  if (status === "frozen") return false;
   if (!hasLiveCopilotMembership(r)) return true;
   const days = parseDaysToExpiry(r?.days_to_expiry);
   return days != null && days <= 7;

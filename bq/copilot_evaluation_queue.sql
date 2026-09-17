@@ -12,8 +12,8 @@
 --      "resubmit" (they stay until the handle is a real username).
 --   3. Or there is no Mariana Tek user_id (MT account not found).
 --   4. Or there is no live Co-Pilot membership (no Co-Pilot-named instance
---      in active / pending / payment_failure — includes gym-only, ended,
---      cancelled, frozen, or missing). They stay until a live Co-Pilot
+--      in active / pending / payment_failure / frozen — includes gym-only,
+--      ended, cancelled, or missing). They stay until a live Co-Pilot
 --      term exists or ops marks them inactive. Copilots with onboarded_at
 --      within the past 48 hours are excluded (MT pipeline lag grace period).
 -- membership_end / days_to_expiry come from copilot_performance (MT
@@ -98,7 +98,7 @@ flagged AS (
     NOT (
       REGEXP_CONTAINS(LOWER(IFNULL(membership_name, '')), r'co[\s-]?pilot')
       AND LOWER(IFNULL(membership_status, '')) IN (
-        'active', 'pending', 'payment_failure'
+        'active', 'pending', 'payment_failure', 'frozen'
       )
     ) AS no_live_copilot
   FROM queued
