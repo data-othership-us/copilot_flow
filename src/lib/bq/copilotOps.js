@@ -518,6 +518,55 @@ export async function listActiveResubmitHandleCopilots() {
   return rows || [];
 }
 
+/**
+ * Active copilots with a live Co-Pilot membership — monthly update list.
+ * Live = Co-Pilot-named instance in active / pending / payment_failure.
+ */
+export async function listMonthlyEmailCopilots() {
+  const { projectId, dataset } = getBqConfig();
+  const bigquery = getBigQueryClient();
+  const [rows] = await bigquery.query({
+    query: `
+      SELECT
+        contact_email,
+        first_name,
+        last_name,
+        region,
+        tier,
+        mt_email,
+        promo_code,
+        offer_link,
+        cycle_points,
+        social_requirement_met,
+        modash_stories_current_membership,
+        modash_feed_posts_current_membership,
+        membership_end,
+        days_to_expiry,
+        membership_status,
+        membership_name,
+        months_since_membership_start
+      FROM \`${projectId}.${dataset}.copilot_performance\`
+      WHERE LOWER(IFNULL(status, '')) = 'active'
+        AND contact_email IS NOT NULL
+        AND TRIM(contact_email) != ''
+        AND REGEXP_CONTAINS(
+          LOWER(IFNULL(membership_name, '')),
+          r'co[\\s-]?pilot'
+        )
+        AND LOWER(IFNULL(membership_status, '')) IN (
+          'active', 'pending', 'payment_failure'
+        )
+      ORDER BY
+        region ASC NULLS LAST,
+        last_name ASC NULLS LAST,
+        first_name ASC NULLS LAST,
+        contact_email
+    `,
+    ...queryOptions(),
+  });
+  return rows || [];
+}
+
 /** Cycle stats for lifecycle emails (from copilot_performance, not copilot_db). */
 export async function getCopilotCycleStats(email) {
   const key = emailKey(email);

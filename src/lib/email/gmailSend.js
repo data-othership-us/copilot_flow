@@ -21,6 +21,7 @@ const MANAGEMENT_EMAIL_KINDS = new Set([
   "copilot_freeze",
   "copilot_payment_nudge",
   "copilot_resubmit_handles",
+  "copilot_monthly",
 ]);
 
 export function getEmailSendMethod() {
@@ -213,7 +214,7 @@ function encodeHeader(value) {
 }
 
 /** Othership eggplant (brand ink) for bold copy. */
-export const EGGPLANT = "#2E1B33";
+export const EGGPLANT = "#372338";
 
 function applyEggplantToBold(html) {
   return String(html || "").replace(/<(strong|b)\b([^>]*)>/gi, (full, tag, attrs) => {

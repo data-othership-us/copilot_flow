@@ -1,0 +1,42 @@
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+  <tr>
+    <td style="font-family:'DM Sans',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;color:#372338;max-width:560px;">
+      <p style="margin:0 0 8px;">Hi {{firstName}},</p>
+      <p style="margin:0 0 4px;">A warm hello from the Co-Pilot desk. Here's where you stand this cycle, plus a few dates worth knowing at the ships.</p>
+
+      {{cycleHeadingHtml}}
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;">
+        <tr>
+          <td style="padding:3px 0;font-family:'DM Sans',Helvetica,Arial,sans-serif;font-size:14px;color:#372338;width:88px;"><strong>Points</strong></td>
+          <td style="padding:3px 0;font-family:'DM Sans',Helvetica,Arial,sans-serif;font-size:14px;color:#372338;">{{cyclePoints}} — {{cycleProgress}}</td>
+        </tr>
+        <tr>
+          <td style="padding:3px 0;font-family:'DM Sans',Helvetica,Arial,sans-serif;font-size:14px;color:#372338;"><strong>Social</strong></td>
+          <td style="padding:3px 0;font-family:'DM Sans',Helvetica,Arial,sans-serif;font-size:14px;color:#372338;">{{socialStatus}} ({{socialCounts}})</td>
+        </tr>
+        <tr>
+          <td style="padding:3px 0;font-family:'DM Sans',Helvetica,Arial,sans-serif;font-size:14px;color:#372338;"><strong>Term</strong></td>
+          <td style="padding:3px 0;font-family:'DM Sans',Helvetica,Arial,sans-serif;font-size:14px;color:#372338;">{{termRemaining}}</td>
+        </tr>
+      </table>
+
+      {{offerHeadingHtml}}
+      <p style="margin:0 0 6px;color:#372338;">Your code: {{promoCode}} ({{discountPercent}}% off)</p>
+      <p style="margin:0 0 6px;color:#372338;">Your 2-for-1: {{offerLinkHtml}}</p>
+
+      {{promoHtml}}
+      {{playgroundHtml}}
+      {{publicEventsHtml}}
+
+      {{reminderHeadingHtml}}
+      <p style="margin:0 0 6px;color:#372338;">One of the following this month: 1 feed post or 4 stories. Tag @othership + #othershipcopilots so we can find it, and tuck in your code and 2-for-1.</p>
+
+      {{hubHeadingHtml}}
+      <p style="margin:0 0 16px;color:#372338;">Perks, how-tos, and anything we missed live in your {{hubHtml}}.</p>
+
+      <div class="email-signature">
+      {{signatureHtml}}
+      </div>
+    </td>
+  </tr>
+</table>

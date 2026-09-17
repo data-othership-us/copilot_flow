@@ -22,6 +22,7 @@ import {
 import {
   freezeUntilDateString,
   isNeverAgainDecision,
+  parseDecision,
   parseFreezeUntil,
   patchReviewDecisionNotes,
   withPaymentNudgeNote,
@@ -746,9 +747,11 @@ async function applyUpdate(row, { dryRun, patch = {} }) {
 }
 
 export async function applyCopilotDecision(row, { dryRun = false, freezeUntil = "", patch = {} } = {}) {
-  const decision = String(row.decision || "")
-    .trim()
-    .toLowerCase();
+  const decision =
+    parseDecision(row.decision) ||
+    String(row.decision || "")
+      .trim()
+      .toLowerCase();
   const needsMtAccount = ["onboard", "renew", "upgrade", "downgrade", "freeze"].includes(
     decision,
   );

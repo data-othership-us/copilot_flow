@@ -179,6 +179,7 @@ Dedup: one row per email; prefer **`active` over `inactive`**, then `ORDER BY ti
 | `npm run assign-memberships`   | Assign Seeker co-pilot memberships by email list                                                                   |
 | `npm run find-reservations`    | Report future reservations for terminating memberships                                                             |
 | `npm run email-resubmit-handles` | One-time: email active copilots with a live Co-Pilot membership whose IG is **re-submit**                        |
+| `npm run email-monthly`            | Monthly update: cycle stats, Notion promo, Social Playgrounds + public events (per region)                      |
 
 ### Resubmit social handles (one-time)
 
@@ -190,6 +191,25 @@ EMAILS=a@example.com DRY_RUN=1 npm run email-resubmit-handles
 LIMIT=5 DRY_RUN=1 npm run email-resubmit-handles
 DRY_RUN=0 npm run email-resubmit-handles -- --apply
 ```
+
+## Monthly Co-Pilot update
+
+Scheduled email to every **active** copilot with a **live Co-Pilot membership** (`active` / `pending` / `payment_failure`). Personal cycle stats come from `copilot_performance`. Shared sections:
+
+- **Promo** — Ready rows for that month in the [Co-Pilot Monthly Promos](https://app.notion.com/p/9d4abbed5e94442d95a2699ead116776) Notion database (`All` / `NYC` / `TO`). Check **Ready** when the copy is good to send.
+- **Events** — same Global Events Calendar cut as `event-automations` monthly lists: Social Playgrounds (Co-Pilot only, linked from the calendar **Public Link** field — never the Notion page) plus public specials. NYC copilots get Flatiron / Williamsburg; TO copilots get Adelaide / Yorkville. Dates already in the past are skipped. Public events note that some need special credits, not Co-Pilot passes.
+- **Reminder** — monthly social ask (4 stories or 1 feed post)
+
+Share both the promo database and the Global Events Calendar with the copilot-flow Notion integration. Default send is the **1st at 11:00am ET** (after the 10:00am event-list job).
+
+```bash
+DRY_RUN=1 npm run email-monthly
+EMAILS=a@example.com LIMIT=3 MONTH=2026-10 DRY_RUN=1 npm run email-monthly
+REGION=NYC DRY_RUN=1 npm run email-monthly
+DRY_RUN=0 npm run email-monthly -- --apply
+```
+
+Deploy: `./deploy/deploy-monthly-email-job.sh` (does not execute). Local sends still need `--apply` unless `NODE_ENV=production`.
 
 ## Env
 

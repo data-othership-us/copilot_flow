@@ -6,7 +6,7 @@
 #     SCHEDULE="15 9 * * *" ./deploy/deploy-lifecycle-job.sh
 #
 # Wrappers: deploy-onboard-job.sh, deploy-evaluate-copilots-job.sh,
-#           deploy-sync-copilot-db-job.sh
+#           deploy-sync-copilot-db-job.sh, deploy-monthly-email-job.sh
 
 set -euo pipefail
 

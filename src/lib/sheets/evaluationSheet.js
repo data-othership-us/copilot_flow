@@ -31,6 +31,9 @@ const REVIEW_HEADERS = [
   "redemption_count_current_membership",
   "redemption_usd_current_membership",
   "redemption_cad_current_membership",
+  "intro_offer_count_current_membership",
+  "intro_offer_usd_current_membership",
+  "intro_offer_cad_current_membership",
   "cycle_points",
   "redemption_count_all_time",
   "redemption_usd_all_time",
@@ -116,40 +119,75 @@ const FILL_HOLD_GREY = {
   blue: 217 / 255,
 };
 
-const DECISION_VALUES = [
-  "onboard",
-  "renew",
-  "offboard",
-  "never again",
-  "upgrade",
-  "downgrade",
-  "snooze",
-  "freeze",
-  "update",
-  "social",
+/** Sheet dropdown labels. parseDecision maps these (and old lowercase) to keys. */
+const DECISION_OPTIONS = [
+  { key: "onboard", label: "Onboard" },
+  { key: "renew", label: "Renew" },
+  { key: "offboard", label: "Offboard" },
+  { key: "never again", label: "Never Again" },
+  { key: "upgrade", label: "Upgrade Tier" },
+  { key: "downgrade", label: "Downgrade Tier" },
+  { key: "snooze", label: "Snooze" },
+  { key: "freeze", label: "Freeze" },
+  { key: "update", label: "Update Profile" },
+  { key: "social", label: "Social Nudge" },
 ];
+
+const DECISION_VALUES = DECISION_OPTIONS.map((o) => o.label);
+
+const DECISION_ALIASES = {
+  onboard: "onboard",
+  "re-onboard": "onboard",
+  reonboard: "onboard",
+  "re onboard": "onboard",
+  renew: "renew",
+  offboard: "offboard",
+  "never again": "never again",
+  never_again: "never again",
+  upgrade: "upgrade",
+  "upgrade tier": "upgrade",
+  "upgrade membership": "upgrade",
+  downgrade: "downgrade",
+  "downgrade tier": "downgrade",
+  snooze: "snooze",
+  freeze: "freeze",
+  update: "update",
+  "update profile": "update",
+  "update info": "update",
+  "update details": "update",
+  social: "social",
+  "social nudge": "social",
+  ...Object.fromEntries(DECISION_OPTIONS.map((o) => [o.label.toLowerCase(), o.key])),
+};
 
 export const PAYMENT_NUDGE_NOTE = "payment method nudge sent";
 export const OFFBOARD_END_NOTE_PREFIX = "offboarding end of term on";
 const APPLY_FAILED_PREFIX = "apply failed:";
 
-/** Any filled decision ops added off-queue stays until apply succeeds. */
+/** Yellow-column draft: email plus edits, no queue membership metrics yet. */
+export function isSparseManualReviewRow(cells) {
+  if (!cellFilled(cells?.[COL.email])) return false;
+  const queueSignals = [
+    COL.daysToExpiry,
+    COL.membershipStatus,
+    COL.membershipName,
+    COL.membershipStart,
+    COL.membershipEnd,
+  ];
+  if (queueSignals.some((i) => cellFilled(cells[i]))) return false;
+  return UPDATE_INPUT_COLS.some((i) => cellFilled(cells[i]));
+}
 export function isManualReviewDecision(value) {
   return Boolean(parseDecision(value));
 }
 
 export function isNeverAgainDecision(value) {
-  const v = String(value || "")
-    .trim()
-    .toLowerCase();
-  return v === "never again" || v === "never_again";
+  return parseDecision(value) === "never again";
 }
 
 export function isOffboardLikeDecision(value) {
-  const v = String(value || "")
-    .trim()
-    .toLowerCase();
-  return v === "offboard" || isNeverAgainDecision(v);
+  const d = parseDecision(value);
+  return d === "offboard" || d === "never again";
 }
 
 export function reviewRowDecision(r) {
@@ -882,6 +920,9 @@ export function rowFromQueue(r) {
     fmtNum(r.redemption_count_current_membership),
     fmtNum(r.redemption_usd_current_membership),
     fmtNum(r.redemption_cad_current_membership),
+    fmtNum(r.intro_offer_count_current_membership),
+    fmtNum(r.intro_offer_usd_current_membership),
+    fmtNum(r.intro_offer_cad_current_membership),
     fmtNum(r.cycle_points),
     fmtNum(r.redemption_count_all_time),
     fmtNum(r.redemption_usd_all_time),
@@ -1165,9 +1206,14 @@ export async function writeAddToModashQueue(addRows, { outliers = [] } = {}) {
  * Rewrite Review from the queue. Holds (payment-method, last-day wait,
  * apply-failed) sort last; otherwise region → tier → days to expiry.
  * Preserves Christine's decision / freeze_until / decision_notes / bb_sales /
- * hybrid_sales / new_hybrid_sales for people still in the queue. If someone
+ * hybrid_sales / new_hybrid_sales for people still in the queue. Filled yellow
+ * update cells (name, promo, ig, emails) are kept when they differ from the
+ * queue or the row is a sparse manual draft (email + edits, no membership
+ * metrics). Those drafts stay even with a blank decision. If someone
  * drops out (live term with more than 7 days left), they leave Review.
- * Unapplied off-queue rows that ops added stay until apply succeeds;
+ * Sparse manual rows (email + yellow edits, blank decision) stay until
+ * they are applied or ops clears them. Unapplied off-queue rows with a
+ * filled decision stay until apply succeeds;
  * applied rows are deleted and not restored. Social-only people (live term
  * more than 7 days out, waiting on a public handle) are not carried back
  * onto Review unless they are a payment-method hold, apply-failed hold, or
@@ -1235,6 +1281,31 @@ export function buildReviewRows(
     byEmail.set(r.email, r);
   }
 
+  function sheetUpdateCellWins(found, next, col) {
+    const value = found.cells[col];
+    if (!cellFilled(value)) return false;
+    if (col === COL.igHandle || col === COL.igUrl) {
+      const rec = {
+        ig_handle: found.cells[COL.igHandle],
+        ig_url: found.cells[COL.igUrl],
+      };
+      if (isResubmitIgRow(rec) || isPlaceholderIgHandle(value)) return false;
+    }
+    if (parseDecision(found.cells[COL.decision]) === "update") return true;
+    if (isSparseManualReviewRow(found.cells)) return true;
+    const a = String(value ?? "").trim();
+    const b = String(next[col] ?? "").trim();
+    if (col === COL.igHandle || col === COL.igUrl) {
+      const ah = parseIgHandles(`${found.cells[COL.igHandle] || ""} ${found.cells[COL.igUrl] || ""}`).join("\n");
+      const bh = parseIgHandles(`${next[COL.igHandle] || ""} ${next[COL.igUrl] || ""}`).join("\n");
+      return ah !== bh;
+    }
+    if (col === COL.newEmail || col === COL.mtEmail) {
+      return a.toLowerCase() !== b.toLowerCase();
+    }
+    return a !== b;
+  }
+
   function mergePreserved(next, found) {
     let merged = [...next];
     if (found) {
@@ -1244,10 +1315,8 @@ export function buildReviewRows(
         }
         if (cellFilled(found.cells[i])) merged[i] = found.cells[i];
       }
-      if (parseDecision(found.cells[COL.decision]) === "update") {
-        for (const i of UPDATE_INPUT_COLS) {
-          if (cellFilled(found.cells[i])) merged[i] = found.cells[i];
-        }
+      for (const i of UPDATE_INPUT_COLS) {
+        if (sheetUpdateCellWins(found, next, i)) merged[i] = found.cells[i];
       }
     }
     const email = String(merged[COL.email] || "")
@@ -1276,10 +1345,16 @@ export function buildReviewRows(
 
   for (const existing of byEmail.values()) {
     if (!existing.email || seen.has(existing.email)) continue;
-    if (!isManualReviewDecision(existing.cells[COL.decision])) continue;
+    if (
+      !isManualReviewDecision(existing.cells[COL.decision]) &&
+      !isSparseManualReviewRow(existing.cells)
+    ) {
+      continue;
+    }
     if (parseDecision(existing.cells[COL.decision]) === "social") continue;
     if (
       socialOnly.has(existing.email) &&
+      !isSparseManualReviewRow(existing.cells) &&
       !keepSocialOnlyHold({
         notes: existing.cells[COL.decisionNotes],
         decision: existing.cells[COL.decision],
@@ -1318,7 +1393,7 @@ export function buildReviewRows(
 
   rebuilt.sort(compareReviewRows);
   return {
-    rebuilt: rebuilt.map(withOffboardHoldNotes),
+    rebuilt: rebuilt.map((cells) => withOffboardHoldNotes(withDecisionLabel(cells))),
     appended,
     skipped,
     carried,
@@ -1399,19 +1474,24 @@ function rowFromUnapplied(unapplied) {
   return overlayUnappliedDecision(out, unapplied);
 }
 
-function sheetDecisionValue(value) {
-  const parsed = parseDecision(value);
-  if (parsed) return parsed;
-  if (isNeverAgainDecision(value)) return "never again";
-  return "";
+function decisionLabel(value) {
+  const key = parseDecision(value);
+  return DECISION_OPTIONS.find((o) => o.key === key)?.label || "";
+}
+
+function withDecisionLabel(cells) {
+  const out = padReviewCells(cells);
+  const label = decisionLabel(out[COL.decision]);
+  if (label) out[COL.decision] = label;
+  return out;
 }
 
 function overlayUnappliedDecision(merged, unapplied) {
   if (!unapplied) return merged;
   const out = [...merged];
-  const fromBq = sheetDecisionValue(unapplied.decision);
+  const fromBq = parseDecision(unapplied.decision);
   if (!cellFilled(out[COL.decision]) && fromBq && fromBq !== "social") {
-    out[COL.decision] = fromBq;
+    out[COL.decision] = decisionLabel(fromBq);
   }
   if (
     !cellFilled(out[COL.decisionNotes]) &&
@@ -1429,12 +1509,10 @@ function overlayUnappliedDecision(merged, unapplied) {
 export function parseDecision(value) {
   const v = String(value || "")
     .trim()
-    .toLowerCase();
-  if (v === "re-onboard" || v === "reonboard" || v === "re onboard") {
-    return "onboard";
-  }
-  if (DECISION_VALUES.includes(v)) return v;
-  return "";
+    .toLowerCase()
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ");
+  return DECISION_ALIASES[v] || "";
 }
 
 /** Keep ops notes; replace any previous apply-failed line. */

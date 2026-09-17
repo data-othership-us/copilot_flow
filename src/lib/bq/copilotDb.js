@@ -632,6 +632,121 @@ export async function backfillSocialFromApplicants() {
   };
 }
 
+const UTM_SESSIONS_LOCATION = "northamerica-northeast2";
+const UTM_SESSIONS_ROW_TYPE = [
+  {
+    session_id: "STRING",
+    session_start_at: "STRING",
+    last_event_at: "STRING",
+    session_date: "STRING",
+    user_id: "STRING",
+    copilot_code: "STRING",
+    is_individual_copilot: "BOOL",
+    reached_checkout: "BOOL",
+    cart_value: "FLOAT64",
+  },
+];
+
+function bqScalar(value) {
+  if (value == null) return null;
+  if (typeof value === "object" && value.value != null) return value.value;
+  if (value instanceof Date) return value.toISOString();
+  return value;
+}
+
+function serializeUtmSession(row) {
+  const start = bqScalar(row.session_start_at);
+  const last = bqScalar(row.last_event_at);
+  const day = bqScalar(row.session_date);
+  const cart = bqScalar(row.cart_value);
+  const cartNum = cart == null || cart === "" ? NaN : Number(cart);
+  return {
+    session_id: row.session_id || null,
+    session_start_at: start ? String(start) : null,
+    last_event_at: last ? String(last) : null,
+    session_date: day ? String(day).slice(0, 10) : null,
+    user_id: row.user_id || null,
+    copilot_code: row.copilot_code
+      ? String(row.copilot_code).trim().toUpperCase()
+      : null,
+    is_individual_copilot: Boolean(row.is_individual_copilot),
+    reached_checkout: Boolean(row.reached_checkout),
+    cart_value: Number.isFinite(cartNum) ? cartNum : null,
+  };
+}
+
+/**
+ * Copy `utm_tracking.copilot_utm_sessions` (northamerica-northeast2) into
+ * `copilots.copilot_utm_sessions` (US). BigQuery views cannot join across
+ * regions; the performance view reads this US snapshot.
+ */
+export async function refreshCopilotUtmSessions() {
+  const bigquery = getBigQueryClient();
+  const { projectId, dataset, location } = getBqConfig();
+  if (!projectId) throw new Error("Missing BQ_PROJECT_ID");
+
+  const dest = `\`${projectId}.${dataset}.copilot_utm_sessions\``;
+  const [sourceRows] = await bigquery.query({
+    query: `
+      SELECT
+        session_id,
+        session_start_at,
+        last_event_at,
+        session_date,
+        user_id,
+        copilot_code,
+        is_individual_copilot,
+        reached_checkout,
+        cart_value
+      FROM \`data-dashboard-463217.utm_tracking.copilot_utm_sessions\`
+    `,
+    location: UTM_SESSIONS_LOCATION,
+  });
+  const rows = (sourceRows || []).map(serializeUtmSession);
+  console.log(`   Snapshot ${rows.length} copilot UTM session(s) → ${dest}`);
+
+  if (rows.length === 0) {
+    await bigquery.query({
+      query: `
+        CREATE OR REPLACE TABLE ${dest} AS
+        SELECT
+          CAST(NULL AS STRING) AS session_id,
+          CAST(NULL AS TIMESTAMP) AS session_start_at,
+          CAST(NULL AS TIMESTAMP) AS last_event_at,
+          CAST(NULL AS DATE) AS session_date,
+          CAST(NULL AS STRING) AS user_id,
+          CAST(NULL AS STRING) AS copilot_code,
+          CAST(NULL AS BOOL) AS is_individual_copilot,
+          CAST(NULL AS BOOL) AS reached_checkout,
+          CAST(NULL AS FLOAT64) AS cart_value
+        LIMIT 0
+      `,
+      location,
+    });
+    return;
+  }
+
+  await bigquery.query({
+    query: `
+      CREATE OR REPLACE TABLE ${dest} AS
+      SELECT
+        session_id,
+        SAFE.TIMESTAMP(session_start_at) AS session_start_at,
+        SAFE.TIMESTAMP(last_event_at) AS last_event_at,
+        SAFE.PARSE_DATE('%Y-%m-%d', session_date) AS session_date,
+        user_id,
+        copilot_code,
+        is_individual_copilot,
+        reached_checkout,
+        cart_value
+      FROM UNNEST(@rows)
+    `,
+    location,
+    params: { rows },
+    types: { rows: UTM_SESSIONS_ROW_TYPE },
+  });
+}
+
 /**
  * Apply CREATE OR REPLACE VIEW/FUNCTION (and CREATE TABLE IF NOT EXISTS)
  * for union, dedup, split_ig_handles, Modash ingest, performance,
@@ -642,6 +757,9 @@ export async function applySheetUnionViews() {
   const bigquery = getBigQueryClient();
   const { projectId, location } = getBqConfig();
   if (!projectId) throw new Error("Missing BQ_PROJECT_ID");
+
+  console.log("   Refreshing copilot UTM session snapshot…");
+  await refreshCopilotUtmSessions();
 
   const fs = await import("node:fs/promises");
   const path = await import("node:path");

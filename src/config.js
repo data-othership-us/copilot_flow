@@ -123,6 +123,18 @@ export const config = {
       ),
       onboarded: env("NOTION_STATUS_ONBOARDED", "Onboarded"),
     },
+    /**
+     * Monthly update: promo rows + Global Events Calendar (same source as
+     * event-automations). Share both databases with the Notion integration.
+     */
+    monthlyPromosDatabaseId: env(
+      "NOTION_MONTHLY_PROMOS_DATABASE_ID",
+      "9d4abbed5e94442d95a2699ead116776"
+    ),
+    eventsDatabaseId: env(
+      "NOTION_EVENTS_DATABASE_ID",
+      "dbb6515ea7334a38bd439e43aec85dee"
+    ),
     reonboard: {
       needsReview: env("NOTION_REONBOARD_NEEDS_REVIEW", "Needs review"),
       proceed: env("NOTION_REONBOARD_PROCEED", "Proceed"),
@@ -183,12 +195,12 @@ export const config = {
    */
   reclaimOnboardedLookbackDays: envInt("RECLAIM_ONBOARDED_LOOKBACK_DAYS", 30),
 
-  /**
-   * Gmail API — Co-Pilot mailbox.
-   * Applications label: rejection + onboarding nudge.
-   * Management label: Review lifecycle (renew / offboard / upgrade / downgrade / freeze / payment nudge / resubmit handles).
-   * Auth a separate Google account via: npm run gmail-oauth
-   */
+    /**
+     * Gmail API — Co-Pilot mailbox.
+     * Applications label: rejection + onboarding nudge.
+     * Management label: Review lifecycle (renew / offboard / upgrade / downgrade / freeze / payment nudge / resubmit handles / monthly).
+     * Auth a separate Google account via: npm run gmail-oauth
+     */
   email: {
     sendMethod: env("EMAIL_SEND_METHOD", "gmail_api").toLowerCase(),
     from: env("EMAIL_FROM", "Othership Co-Pilot Program <copilots@othership.us>"),

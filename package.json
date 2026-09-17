@@ -26,7 +26,8 @@
     "assign-memberships": "node src/scripts/assignMembershipsToUsers.js",
     "find-reservations": "node src/scripts/findReservations.js",
     "apply-offboard-credits": "node src/scripts/applyOffboardCredits.js",
-    "email-resubmit-handles": "node src/scripts/emailResubmitHandles.js"
+    "email-resubmit-handles": "node src/scripts/emailResubmitHandles.js",
+    "email-monthly": "node src/scripts/emailMonthlyUpdate.js"
   },
   "engines": {
     "node": ">=20"
