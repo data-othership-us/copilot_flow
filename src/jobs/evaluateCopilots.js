@@ -28,6 +28,7 @@ import {
   listReviewSheetRows,
   listSalesWritebacks,
   markSheetApplied,
+  parseDecision,
   patchReviewDecisionNotes,
   readyDecisionsFromReviewCells,
   reviewRowDecision,
@@ -75,6 +76,32 @@ function queueEmailSet(queue) {
   );
 }
 
+function tsMs(value) {
+  if (value == null || value === "") return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.getTime();
+  }
+  if (typeof value === "object" && value.value != null) return tsMs(value.value);
+  const n = Date.parse(String(value));
+  return Number.isNaN(n) ? null : n;
+}
+
+/**
+ * Stamp-only when this same decision was applied at or after it was recorded.
+ * A leftover applied stamp from update/freeze/etc must not skip a later onboard.
+ */
+function isDecisionAlreadyApplied(existing, item) {
+  if (!existing?.decision_applied_at) return false;
+  if (String(item?.decision || "").toLowerCase() === "social") return false;
+  const stored = parseDecision(existing.decision);
+  if (!stored || stored !== item.decision) return false;
+  const applied = tsMs(existing.decision_applied_at);
+  const decided = tsMs(existing.decision_at);
+  if (applied == null) return false;
+  if (decided == null) return true;
+  return applied >= decided;
+}
+
 async function applyReadyItems(items, summary, attempted) {
   const ordered = [...items].sort((a, b) => b.rowNumber - a.rowNumber);
   for (const item of ordered) {
@@ -83,6 +110,27 @@ async function applyReadyItems(items, summary, attempted) {
     const label = item.email;
     console.log(`\n—— Decision: ${label} → ${item.decision} ——`);
     try {
+      let existing = await getCopilotByEmail(item.email);
+      if (!existing && item.decision === "update" && item.newEmail) {
+        existing = await getCopilotByEmail(item.newEmail);
+      }
+      if (isDecisionAlreadyApplied(existing, item)) {
+        console.log("   ⏭️  Already applied in BQ — stamp sheet only");
+        if (config.dryRun) {
+          console.log(`   (DRY_RUN: would delete Review row ${item.rowNumber})`);
+        } else {
+          await markSheetApplied({
+            rowNumber: item.rowNumber,
+          });
+        }
+        summary.applied++;
+        continue;
+      }
+
+      const clearAppliedStamp =
+        Boolean(existing?.decision_applied_at) &&
+        parseDecision(existing?.decision) !== item.decision;
+
       if (shouldHoldUntilExpiry(item)) {
         const days =
           item.daysToExpiry == null ? "?" : item.daysToExpiry;
@@ -99,6 +147,7 @@ async function applyReadyItems(items, summary, attempted) {
             decision_notes: item.decisionNotes || null,
             decision_at: "NOW",
             decision_source: "evaluation_sheet",
+            ...(clearAppliedStamp ? { decision_applied_at: null } : {}),
             ...(item.bbSales != null ? { bb_sales: item.bbSales } : {}),
             ...(item.hybridSales != null
               ? { hybrid_sales: item.hybridSales }
@@ -125,6 +174,7 @@ async function applyReadyItems(items, summary, attempted) {
           decision_notes: item.decisionNotes || null,
           decision_at: "NOW",
           decision_source: "evaluation_sheet",
+          ...(clearAppliedStamp ? { decision_applied_at: null } : {}),
           ...(item.bbSales != null ? { bb_sales: item.bbSales } : {}),
           ...(item.hybridSales != null
             ? { hybrid_sales: item.hybridSales }
@@ -137,7 +187,7 @@ async function applyReadyItems(items, summary, attempted) {
         summary.decisionsIngested++;
       }
 
-      let copilot = await getCopilotByEmail(item.email);
+      let copilot = existing || (await getCopilotByEmail(item.email));
       if (!copilot && item.decision === "update" && item.newEmail) {
         copilot = await getCopilotByEmail(item.newEmail);
       }
@@ -146,24 +196,12 @@ async function applyReadyItems(items, summary, attempted) {
       }
       copilot.decision = item.decision;
       copilot.decision_notes = item.decisionNotes;
+      if (clearAppliedStamp) copilot.decision_applied_at = null;
       console.log(
         `   ${copilot.region || "?"} / ${copilot.tier || "?"}` +
           `  user_id=${copilot.user_id || "?"}` +
           `  promo=${copilot.promo_code || "?"}`
       );
-
-      if (copilot.decision_applied_at && item.decision !== "social") {
-        console.log("   ⏭️  Already applied in BQ — stamp sheet only");
-        if (config.dryRun) {
-          console.log(`   (DRY_RUN: would delete Review row ${item.rowNumber})`);
-        } else {
-          await markSheetApplied({
-            rowNumber: item.rowNumber,
-          });
-        }
-        summary.applied++;
-        continue;
-      }
 
       const result = await applyCopilotDecision(copilot, {
         dryRun: config.dryRun,

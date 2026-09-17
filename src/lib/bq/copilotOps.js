@@ -500,7 +500,7 @@ export async function getCopilotCycleStats(email) {
   return rows?.[0] || null;
 }
 
-export async function listUnappliedDecisions() {
+/** Filled decisions that still need apply (never applied, or a newer decision_at). */
   const bigquery = getBigQueryClient();
   const [rows] = await bigquery.query({
     query: `
@@ -527,7 +527,13 @@ export async function listUnappliedDecisions() {
           'onboard', 'renew', 'offboard', 'never again', 'never_again',
           'upgrade', 'downgrade', 'snooze', 'freeze', 'update', 'social'
         )
-        AND decision_applied_at IS NULL
+        AND (
+          decision_applied_at IS NULL
+          OR (
+            decision_at IS NOT NULL
+            AND decision_applied_at < decision_at
+          )
+        )
         AND contact_email IS NOT NULL
       ORDER BY decision_at NULLS LAST, contact_email
     `,
