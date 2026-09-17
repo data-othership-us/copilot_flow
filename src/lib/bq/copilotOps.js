@@ -18,6 +18,41 @@ function emailKey(email) {
     .toLowerCase();
 }
 
+/**
+ * Resolve an MT user_id from core.mt_users: mt_email first, then contact email.
+ * Skips merged rows; prefers is_active.
+ */
+export async function lookupMtUserIdByEmails({ mtEmail, contactEmail } = {}) {
+  const emails = [...new Set(
+    [mtEmail, contactEmail].map((e) => emailKey(e)).filter(Boolean),
+  )];
+  if (!emails.length) return null;
+  const bigquery = getBigQueryClient();
+  const [rows] = await bigquery.query({
+    query: `
+      SELECT
+        CAST(user_id AS STRING) AS user_id,
+        LOWER(TRIM(email)) AS email
+      FROM \`data-pipeline-492715.core.mt_users\`
+      WHERE LOWER(TRIM(email)) IN UNNEST(@emails)
+        AND IFNULL(is_merged, FALSE) = FALSE
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY LOWER(TRIM(email))
+        ORDER BY IF(IFNULL(is_active, TRUE), 0, 1), CAST(user_id AS STRING)
+      ) = 1
+    `,
+    ...queryOptions({ emails }),
+  });
+  const byEmail = new Map(
+    (rows || []).map((r) => [emailKey(r.email), String(r.user_id || "")]),
+  );
+  for (const email of emails) {
+    const userId = byEmail.get(email);
+    if (userId) return { userId, email };
+  }
+  return null;
+}
+
 /** Sheet MERGE kept mixed-case column names (Promo_Code, First_Name, …). */
 function copilotField(row, name) {
   if (!row) return undefined;
@@ -262,6 +297,9 @@ export async function listEvaluationQueue() {
         redemption_count_current_membership,
         redemption_usd_current_membership,
         redemption_cad_current_membership,
+        intro_offer_count_current_membership,
+        intro_offer_usd_current_membership,
+        intro_offer_cad_current_membership,
         cycle_points,
         redemption_count_all_time,
         redemption_usd_all_time,

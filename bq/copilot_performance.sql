@@ -2,7 +2,8 @@
 -- Grain: one row per copilot_db contact_email (active first, then inactive).
 --
 -- Joins:
---   - data-pipeline mt_users + mt_locations (home_studio from home_location)
+--   - data-pipeline mt_users + mt_locations (home_studio from home_location).
+--     user_id is mt_users matched on mt_email, else contact_email, else copilot_db.
 --   - data-pipeline mt_membership_instances (name / start / end by user_id)
 --   - data-pipeline mt_reservations (check-ins → total + since membership_start)
 --   - data-pipeline mt_sessions (Social Playground check-ins; private/free MT class)
@@ -15,6 +16,11 @@
 --   - all_time_data.order_all_time_tax via stg_mt_discounts.attr_name
 --       (promo-attributed orders in the current membership term; subtotal_pretax;
 --       plus redemption_count_since_membership_end after membership_end)
+--   - copilots.copilot_utm_sessions (US snapshot of
+--       data-dashboard-463217.utm_tracking.copilot_utm_sessions)
+--       Individual offer-link sessions (utm_content = promo_code) joined to
+--       mt_orders for Co-Pilot 2-for intro products. Last-touch within 7 days.
+--       Added to promo redemptions for cycle_points.
 --   - copilots.modash_content + modash_creators (Slack-bot CSV ingest)
 --       Join: contact_email ↔ creator email_raw, else split_ig_handles
 --       (ops sheets may list several IG accounts in one cell).
@@ -33,8 +39,8 @@
 -- days_to_expiry is DATE_DIFF(membership_end, today Eastern).
 -- copilot_months_active is the total length of Co-Pilot-named instances only.
 -- cycle_points: floor(redemption_subtotal_current_membership / 100).
---   That total is pretax code sales in the latest Co-Pilot term
---   (NYC = USD, TO = CAD).
+--   That total is pretax promo-code sales plus Co-Pilot intro-offer (2-for-1)
+--   link sales in the latest Co-Pilot term (NYC = USD, TO = CAD).
 -- social_requirement_met: 4 stories/month or 1 reel/carousel per month in term.
 -- Current-term stories / feed posts: posted_at in [membership_start, membership_end].
 -- Modash impressions: posted_at >= latest Co-Pilot membership start.
@@ -132,9 +138,45 @@ current_promo AS (
   WHERE TRIM(IFNULL(code, '')) != ''
   GROUP BY 1
 ),
+-- One MT user per email (skip merged; prefer active).
+mt_users_one AS (
+  SELECT * EXCEPT (rn) FROM (
+    SELECT
+      CAST(user_id AS STRING) AS user_id,
+      LOWER(TRIM(email)) AS email,
+      home_location_id,
+      ROW_NUMBER() OVER (
+        PARTITION BY LOWER(TRIM(email))
+        ORDER BY
+          CASE WHEN IFNULL(is_merged, FALSE) THEN 1 ELSE 0 END,
+          CASE WHEN IFNULL(is_active, TRUE) THEN 0 ELSE 1 END,
+          CAST(user_id AS STRING)
+      ) AS rn
+    FROM `data-pipeline-492715.core.mt_users`
+    WHERE email IS NOT NULL AND TRIM(email) != ''
+  )
+  WHERE rn = 1
+),
+roster_resolved AS (
+  SELECT
+    c.*,
+    COALESCE(
+      NULLIF(u_mt.user_id, ''),
+      NULLIF(u_contact.user_id, ''),
+      NULLIF(CAST(c.user_id AS STRING), '')
+    ) AS resolved_user_id
+  FROM roster_copilots AS c
+  LEFT JOIN mt_users_one AS u_mt
+    ON TRIM(IFNULL(c.mt_email, '')) != ''
+    AND u_mt.email = LOWER(TRIM(c.mt_email))
+  LEFT JOIN mt_users_one AS u_contact
+    ON TRIM(IFNULL(c.contact_email, '')) != ''
+    AND u_contact.email = LOWER(TRIM(c.contact_email))
+),
 enriched AS (
   SELECT
-    c.* EXCEPT (promo_code),
+    c.* EXCEPT (promo_code, user_id),
+    COALESCE(c.resolved_user_id, CAST(c.user_id AS STRING)) AS user_id,
     COALESCE(
       IF(
         UPPER(TRIM(IFNULL(c.promo_code, ''))) IN UNNEST(cp.promo_keys),
@@ -175,13 +217,13 @@ enriched AS (
     m.membership_status AS mem_status,
     DATE(m.membership_start, 'America/New_York') AS mem_start_date,
     m.membership_end_date AS mem_end_date
-  FROM roster_copilots AS c
+  FROM roster_resolved AS c
   LEFT JOIN current_promo AS cp
     ON cp.discount_id = CAST(c.discount_id AS STRING)
   LEFT JOIN membership_from_pipeline AS m
-    ON m.user_id = CAST(c.user_id AS STRING)
+    ON m.user_id = c.resolved_user_id
   LEFT JOIN `data-pipeline-492715.core.mt_users` AS u
-    ON CAST(u.user_id AS STRING) = CAST(c.user_id AS STRING)
+    ON CAST(u.user_id AS STRING) = c.resolved_user_id
   LEFT JOIN `data-pipeline-492715.core.mt_locations` AS loc
     ON CAST(loc.location_id AS STRING) = CAST(u.home_location_id AS STRING)
 ),
@@ -420,6 +462,91 @@ sales_after_membership AS (
   FROM promo_orders_after_end
   GROUP BY contact_email
 ),
+-- Co-Pilot intro-offer (2-for-1) sales from the individual offer link.
+-- Snapshot is refreshed in applySheetUnionViews from utm_tracking
+-- (northeast2 → US). Buyer MT user_id on the session → completed
+-- Co-Pilot 2-for order, last-touch within 7 days of session_start.
+intro_offer_orders AS (
+  SELECT
+    s.copilot_code,
+    o.order_id,
+    o.currency,
+    CAST(o.subtotal AS FLOAT64) AS subtotal_pretax,
+    o.purchased_at
+  FROM `YOUR_PROJECT.copilots.copilot_utm_sessions` AS s
+  JOIN `data-pipeline-492715.core.mt_orders` AS o
+    ON CAST(o.user_id AS STRING) = CAST(s.user_id AS STRING)
+   AND o.purchased_at >= s.session_start_at
+   AND o.purchased_at < TIMESTAMP_ADD(s.session_start_at, INTERVAL 7 DAY)
+   AND LOWER(IFNULL(o.status, '')) = 'completed'
+   AND IFNULL(o.contains_refund, FALSE) = FALSE
+   AND CAST(o.subtotal AS FLOAT64) > 0
+  WHERE IFNULL(s.is_individual_copilot, FALSE)
+    AND s.user_id IS NOT NULL AND TRIM(s.user_id) != ''
+    AND s.copilot_code IS NOT NULL AND TRIM(s.copilot_code) != ''
+    AND EXISTS (
+      SELECT 1
+      FROM `data-pipeline-492715.core.mt_order_lines` AS l
+      WHERE l.order_id = o.order_id
+        AND REGEXP_CONTAINS(
+          LOWER(COALESCE(l.product_name, l.title, '')),
+          r'co[\s-]?pilot'
+        )
+        AND REGEXP_CONTAINS(
+          LOWER(COALESCE(l.product_name, l.title, '')),
+          r'2[ -]?for'
+        )
+    )
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY o.order_id
+    ORDER BY s.session_start_at DESC
+  ) = 1
+),
+intro_orders_current AS (
+  SELECT DISTINCT
+    e.contact_email,
+    i.order_id,
+    i.currency,
+    i.subtotal_pretax
+  FROM enriched AS e
+  JOIN UNNEST(e.promo_keys) AS pk
+  JOIN intro_offer_orders AS i
+    ON UPPER(TRIM(i.copilot_code)) = pk
+  WHERE e.mem_start_date IS NOT NULL
+    AND REGEXP_CONTAINS(LOWER(IFNULL(e.mem_name, '')), r'co[\s-]?pilot')
+    AND DATE(i.purchased_at, 'America/New_York') >= e.mem_start_date
+    AND DATE(i.purchased_at, 'America/New_York')
+      <= COALESCE(e.mem_end_date, CURRENT_DATE('America/New_York'))
+),
+intro_sales_current_membership AS (
+  SELECT
+    contact_email,
+    COUNT(*) AS intro_offer_count_current_membership,
+    SUM(IF(UPPER(currency) = 'USD', subtotal_pretax, 0))
+      AS intro_offer_subtotal_usd_current_membership,
+    SUM(IF(UPPER(currency) = 'CAD', subtotal_pretax, 0))
+      AS intro_offer_subtotal_cad_current_membership
+  FROM intro_orders_current
+  GROUP BY contact_email
+),
+intro_orders_after_end AS (
+  SELECT DISTINCT
+    e.contact_email,
+    i.order_id
+  FROM enriched AS e
+  JOIN UNNEST(e.promo_keys) AS pk
+  JOIN intro_offer_orders AS i
+    ON UPPER(TRIM(i.copilot_code)) = pk
+  WHERE e.mem_end_date IS NOT NULL
+    AND DATE(i.purchased_at, 'America/New_York') > e.mem_end_date
+),
+intro_sales_after_membership AS (
+  SELECT
+    contact_email,
+    COUNT(*) AS intro_offer_count_since_membership_end
+  FROM intro_orders_after_end
+  GROUP BY contact_email
+),
 -- Creator emails exploded for matching when copilot_db.ig_handle is missing.
 modash_creator_emails AS (
   SELECT
@@ -620,14 +747,22 @@ SELECT
   scm.redemption_count_current_membership,
   scm.redemption_subtotal_usd_current_membership,
   scm.redemption_subtotal_cad_current_membership,
+  COALESCE(intro.intro_offer_count_current_membership, 0)
+    AS intro_offer_count_current_membership,
+  COALESCE(intro.intro_offer_subtotal_usd_current_membership, 0)
+    AS intro_offer_subtotal_usd_current_membership,
+  COALESCE(intro.intro_offer_subtotal_cad_current_membership, 0)
+    AS intro_offer_subtotal_cad_current_membership,
   COALESCE(
     IF(
       REGEXP_CONTAINS(
         UPPER(TRIM(IFNULL(e.region, ''))),
         r'^(NYC|NY)$|NEW YORK'
       ),
-      scm.redemption_subtotal_usd_current_membership,
-      scm.redemption_subtotal_cad_current_membership
+      COALESCE(scm.redemption_subtotal_usd_current_membership, 0)
+        + COALESCE(intro.intro_offer_subtotal_usd_current_membership, 0),
+      COALESCE(scm.redemption_subtotal_cad_current_membership, 0)
+        + COALESCE(intro.intro_offer_subtotal_cad_current_membership, 0)
     ),
     0
   ) AS redemption_subtotal_current_membership,
@@ -639,15 +774,19 @@ SELECT
             UPPER(TRIM(IFNULL(e.region, ''))),
             r'^(NYC|NY)$|NEW YORK'
           ),
-          scm.redemption_subtotal_usd_current_membership,
-          scm.redemption_subtotal_cad_current_membership
+          COALESCE(scm.redemption_subtotal_usd_current_membership, 0)
+            + COALESCE(intro.intro_offer_subtotal_usd_current_membership, 0),
+          COALESCE(scm.redemption_subtotal_cad_current_membership, 0)
+            + COALESCE(intro.intro_offer_subtotal_cad_current_membership, 0)
         ),
         0
       ),
       0
     ) / 100
   ) AS INT64) AS cycle_points,
-  COALESCE(sam.redemption_count_since_membership_end, 0) AS redemption_count_since_membership_end,
+  COALESCE(sam.redemption_count_since_membership_end, 0)
+    + COALESCE(intro_after.intro_offer_count_since_membership_end, 0)
+    AS redemption_count_since_membership_end,
 
   -- Sheet sales fallbacks
   e.combined_sales AS sheet_combined_sales,
@@ -677,6 +816,10 @@ LEFT JOIN sales_current_membership AS scm
   ON scm.contact_email = e.contact_email
 LEFT JOIN sales_after_membership AS sam
   ON sam.contact_email = e.contact_email
+LEFT JOIN intro_sales_current_membership AS intro
+  ON intro.contact_email = e.contact_email
+LEFT JOIN intro_sales_after_membership AS intro_after
+  ON intro_after.contact_email = e.contact_email
 LEFT JOIN modash_stats AS md
   ON md.contact_email = e.contact_email
 LEFT JOIN modash_current_stats AS mdc

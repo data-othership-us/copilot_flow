@@ -28,13 +28,12 @@ import {
   withResubmitHandlesEmailedNote,
   RESUBMIT_HANDLES_EMAILED_NOTE,
 } from "../sheets/evaluationSheet.js";
-import { updateCopilotByEmail, getCopilotByEmail, getCopilotCycleStats } from "../bq/copilotOps.js";
+import { updateCopilotByEmail, getCopilotByEmail, getCopilotCycleStats, lookupMtUserIdByEmails } from "../bq/copilotOps.js";
 import {
   assertValidPaymentMethod,
   isPaymentMethodError,
 } from "../mt/bankcards.js";
 import { igProfileUrl, storedIgHandle } from "../instagram.js";
-import { findMtUserByEmail } from "../mt/copilotUserLookup.js";
 import { buildOfferLink } from "../offerLink.js";
 import { listTakenPromoCodes } from "../onboard/existingPromo.js";
 import {
@@ -549,21 +548,18 @@ function mtProfileLink(userId) {
 
 /** Use the MT account for mt_email (else contact_email) before membership/payment. */
 async function syncMtUserFromEmail(row, { dryRun = false } = {}) {
-  const lookupEmail = fieldEmail(row.mt_email) || fieldEmail(row.contact_email);
-  if (!lookupEmail || !config.mt.baseUrl || !config.mt.apiKey) return;
-  const user = await findMtUserByEmail(
-    config.mt.baseUrl,
-    config.mt.apiKey,
-    lookupEmail,
-  );
-  if (!user?.id) {
+  const found = await lookupMtUserIdByEmails({
+    mtEmail: row.mt_email,
+    contactEmail: row.contact_email,
+  });
+  if (!found?.userId) {
     console.warn(
-      `   ⚠️  no MT user for ${lookupEmail} — keeping user_id=${row.user_id || "?"}`,
+      `   ⚠️  no mt_users row for ${fieldEmail(row.mt_email) || fieldEmail(row.contact_email) || "?"} — keeping user_id=${row.user_id || "?"}`,
     );
     return;
   }
-  const userId = String(user.id);
-  const mtEmail = fieldEmail(user.attributes?.email) || lookupEmail;
+  const userId = found.userId;
+  const mtEmail = found.email;
   if (
     userId === String(row.user_id || "") &&
     mtEmail === fieldEmail(row.mt_email)
@@ -574,11 +570,9 @@ async function syncMtUserFromEmail(row, { dryRun = false } = {}) {
     `   🔄 MT account ${row.user_id || "(none)"} → ${userId} (${mtEmail})`,
   );
   row.user_id = userId;
-  row.mt_email = mtEmail;
   if (dryRun) return;
   await updateCopilotByEmail(fieldEmail(row.contact_email), {
     user_id: userId,
-    mt_email: mtEmail,
     mt_profile_link: mtProfileLink(userId),
   });
 }
@@ -672,15 +666,11 @@ async function applyUpdate(row, { dryRun, patch = {} }) {
   if (mtEmail && mtEmail !== fieldEmail(row.mt_email)) {
     fields.mt_email = mtEmail;
     changes.push(`mt_email ${fieldEmail(row.mt_email) || "(none)"} → ${mtEmail}`);
-    const user = await findMtUserByEmail(
-      config.mt.baseUrl,
-      config.mt.apiKey,
-      mtEmail,
-    );
-    if (!user?.id) {
-      throw new Error(`no MT user for mt_email: ${mtEmail}`);
+    const found = await lookupMtUserIdByEmails({ mtEmail });
+    if (!found?.userId) {
+      throw new Error(`no mt_users row for mt_email: ${mtEmail}`);
     }
-    const userId = String(user.id);
+    const userId = found.userId;
     if (userId !== String(row.user_id || "")) {
       fields.user_id = userId;
       fields.mt_profile_link = mtProfileLink(userId);
