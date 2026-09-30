@@ -521,7 +521,13 @@ export async function onboardCopilots() {
       `📋 ${rows.length} email(s) from ONBOARD_EMAILS (not the pending queue)`
     );
   } else {
-    rows = await listPendingOnboard();
+    const pending = await listPendingOnboard();
+    rows = pending.rows;
+    if (pending.rejectedSkipped) {
+      console.log(
+        `   ⏭️  ${pending.rejectedSkipped} rejected applicant(s) left off the queue`
+      );
+    }
     if (config.onboardLimit > 0) {
       rows = rows.slice(0, config.onboardLimit);
       console.log(

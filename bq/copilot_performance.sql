@@ -12,7 +12,9 @@
 --   - data-pipeline stg_mt_discounts (promo_code_status; current code string by discount_id)
 --       View promo_code is the current MT code when discount_id matches, else copilot_db.
 --       Usage / cycle_points use that live code (and the voucher name via discount_id).
---       copilot_db.promo_code is not rewritten (onboard / offer_link stay as stored).
+--       copilot_db.promo_code is not rewritten. View offer_link is rebuilt from
+--       that live code (intro-offer?id=). Stored copilot_db.offer_link is used
+--       only when there is no code.
 --   - all_time_data.order_all_time_tax via stg_mt_discounts.attr_name
 --       (promo-attributed orders in the current membership term; subtotal_pretax;
 --       plus redemption_count_since_membership_end after membership_end)
@@ -25,7 +27,7 @@
 --       Join: contact_email ↔ creator email_raw, else split_ig_handles
 --       (ops sheets may list several IG accounts in one cell).
 --       Campaign impressions since the latest Co-Pilot membership start.
---       Current-term stories / feed posts for the social requirement.
+--       Current-term stories / feed posts, scored per Eastern calendar month.
 --       modash_followers from Creators CSV. View ig_followers =
 --       COALESCE(modash_followers, copilot_db seed). Not written back to copilot_db.
 --
@@ -41,7 +43,17 @@
 -- cycle_points: floor(redemption_subtotal_current_membership / 100).
 --   That total is pretax promo-code sales plus Co-Pilot intro-offer (2-for-1)
 --   link sales in the latest Co-Pilot term (NYC = USD, TO = CAD).
--- social_requirement_met: 4 stories/month or 1 reel/carousel per month in term.
+-- last_month_points: same formula for the previous complete Eastern
+--   calendar month (a September email ranks August). Still clipped to the
+--   live Co-Pilot term.
+-- social_requirement_met: every completed calendar month in the term has
+--   4 stories or 1 reel/carousel that month (OR, not both). Vacuously true
+--   when no month in the term has finished yet. Current in-progress month
+--   is excluded until its last membership day has passed.
+-- social_requirement_met_last_month: previous complete Eastern calendar
+--   month (NULL if that month is outside the term).
+-- social_requirement_months_met: month names in the term that already
+--   cleared the bar, including the current month if they already posted.
 -- Current-term stories / feed posts: posted_at in [membership_start, membership_end].
 -- Modash impressions: posted_at >= latest Co-Pilot membership start.
 --
@@ -440,6 +452,39 @@ sales_current_membership AS (
   FROM promo_orders_since
   GROUP BY contact_email
 ),
+-- Promo-attributed orders in the previous complete Eastern calendar month,
+-- still inside the live Co-Pilot term.
+promo_orders_last_month AS (
+  SELECT DISTINCT
+    cdn.contact_email,
+    o.order_id,
+    o.currency,
+    CAST(o.subtotal_pretax AS FLOAT64) AS subtotal_pretax
+  FROM copilot_discount_name AS cdn
+  JOIN enriched AS e
+    ON e.contact_email = cdn.contact_email
+  JOIN `data-dashboard-463217.all_time_data.order_all_time_tax` AS o
+    ON e.mem_start_date IS NOT NULL
+   AND REGEXP_CONTAINS(LOWER(IFNULL(e.mem_name, '')), r'co[\s-]?pilot')
+   AND DATE(o.purchase_time, 'America/New_York') >= e.mem_start_date
+   AND DATE(o.purchase_time, 'America/New_York')
+     <= COALESCE(e.mem_end_date, CURRENT_DATE('America/New_York'))
+   AND DATE(o.purchase_time, 'America/New_York')
+     >= DATE_SUB(DATE_TRUNC(CURRENT_DATE('America/New_York'), MONTH), INTERVAL 1 MONTH)
+   AND DATE(o.purchase_time, 'America/New_York')
+     < DATE_TRUNC(CURRENT_DATE('America/New_York'), MONTH)
+   AND IFNULL(o.contains_refund, FALSE) = FALSE
+  JOIN UNNEST(o.discount_name) AS discount_name_item
+  WHERE discount_name_item = cdn.discount_name
+),
+sales_last_month AS (
+  SELECT
+    contact_email,
+    SUM(IF(UPPER(currency) = 'USD', subtotal_pretax, 0)) AS redemption_subtotal_usd_last_month,
+    SUM(IF(UPPER(currency) = 'CAD', subtotal_pretax, 0)) AS redemption_subtotal_cad_last_month
+  FROM promo_orders_last_month
+  GROUP BY contact_email
+),
 -- Promo-attributed orders after the current membership end date.
 promo_orders_after_end AS (
   SELECT DISTINCT
@@ -529,6 +574,36 @@ intro_sales_current_membership AS (
   FROM intro_orders_current
   GROUP BY contact_email
 ),
+intro_orders_last_month AS (
+  SELECT DISTINCT
+    e.contact_email,
+    i.order_id,
+    i.currency,
+    i.subtotal_pretax
+  FROM enriched AS e
+  JOIN UNNEST(e.promo_keys) AS pk
+  JOIN intro_offer_orders AS i
+    ON UPPER(TRIM(i.copilot_code)) = pk
+  WHERE e.mem_start_date IS NOT NULL
+    AND REGEXP_CONTAINS(LOWER(IFNULL(e.mem_name, '')), r'co[\s-]?pilot')
+    AND DATE(i.purchased_at, 'America/New_York') >= e.mem_start_date
+    AND DATE(i.purchased_at, 'America/New_York')
+      <= COALESCE(e.mem_end_date, CURRENT_DATE('America/New_York'))
+    AND DATE(i.purchased_at, 'America/New_York')
+      >= DATE_SUB(DATE_TRUNC(CURRENT_DATE('America/New_York'), MONTH), INTERVAL 1 MONTH)
+    AND DATE(i.purchased_at, 'America/New_York')
+      < DATE_TRUNC(CURRENT_DATE('America/New_York'), MONTH)
+),
+intro_sales_last_month AS (
+  SELECT
+    contact_email,
+    SUM(IF(UPPER(currency) = 'USD', subtotal_pretax, 0))
+      AS intro_offer_subtotal_usd_last_month,
+    SUM(IF(UPPER(currency) = 'CAD', subtotal_pretax, 0))
+      AS intro_offer_subtotal_cad_last_month
+  FROM intro_orders_last_month
+  GROUP BY contact_email
+),
 intro_orders_after_end AS (
   SELECT DISTINCT
     e.contact_email,
@@ -605,7 +680,8 @@ modash_posts_current_membership AS (
   SELECT
     e.contact_email,
     p.content_key,
-    ANY_VALUE(LOWER(TRIM(p.content_type))) AS content_type
+    ANY_VALUE(LOWER(TRIM(p.content_type))) AS content_type,
+    ANY_VALUE(DATE(p.posted_at, 'America/New_York')) AS posted_date
   FROM enriched AS e
   JOIN copilot_modash_handles AS h
     ON h.contact_email = e.contact_email
@@ -619,12 +695,96 @@ modash_posts_current_membership AS (
   WHERE `YOUR_PROJECT.copilots.normalize_ig_handle`(p.influencer) IS NOT NULL
   GROUP BY e.contact_email, p.content_key
 ),
+modash_posts_by_month AS (
+  SELECT
+    contact_email,
+    DATE_TRUNC(posted_date, MONTH) AS month_start,
+    COUNTIF(content_type = 'story') AS stories,
+    COUNTIF(content_type IN ('reel', 'carousel')) AS feed_posts
+  FROM modash_posts_current_membership
+  GROUP BY contact_email, month_start
+),
+-- Eastern calendar months overlapping the term through today.
+membership_calendar_months AS (
+  SELECT
+    e.contact_email,
+    e.mem_end_date,
+    month_start
+  FROM enriched AS e,
+    UNNEST(
+      GENERATE_DATE_ARRAY(
+        DATE_TRUNC(e.mem_start_date, MONTH),
+        DATE_TRUNC(
+          LEAST(e.mem_end_date, CURRENT_DATE('America/New_York')),
+          MONTH
+        ),
+        INTERVAL 1 MONTH
+      )
+    ) AS month_start
+  WHERE e.mem_start_date IS NOT NULL
+    AND e.mem_end_date IS NOT NULL
+    AND REGEXP_CONTAINS(LOWER(IFNULL(e.mem_name, '')), r'co[\s-]?pilot')
+    AND DATE_TRUNC(e.mem_start_date, MONTH)
+      <= DATE_TRUNC(
+        LEAST(e.mem_end_date, CURRENT_DATE('America/New_York')),
+        MONTH
+      )
+),
+social_months AS (
+  SELECT
+    m.contact_email,
+    m.month_start,
+    COALESCE(p.stories, 0) AS stories,
+    COALESCE(p.feed_posts, 0) AS feed_posts,
+    (
+      COALESCE(p.stories, 0) >= 4
+      OR COALESCE(p.feed_posts, 0) >= 1
+    ) AS met,
+    LEAST(
+      DATE_SUB(DATE_ADD(m.month_start, INTERVAL 1 MONTH), INTERVAL 1 DAY),
+      m.mem_end_date
+    ) < CURRENT_DATE('America/New_York') AS completed,
+    m.month_start = DATE_SUB(
+      DATE_TRUNC(CURRENT_DATE('America/New_York'), MONTH),
+      INTERVAL 1 MONTH
+    ) AS is_last_month,
+    FORMAT_DATE(
+      IF(
+        MIN(EXTRACT(YEAR FROM m.month_start)) OVER (
+          PARTITION BY m.contact_email
+        ) != MAX(EXTRACT(YEAR FROM m.month_start)) OVER (
+          PARTITION BY m.contact_email
+        ),
+        '%B %Y',
+        '%B'
+      ),
+      m.month_start
+    ) AS month_label
+  FROM membership_calendar_months AS m
+  LEFT JOIN modash_posts_by_month AS p
+    ON p.contact_email = m.contact_email
+   AND p.month_start = m.month_start
+),
 modash_current_stats AS (
   SELECT
     contact_email,
-    COUNTIF(content_type = 'story') AS modash_stories_current_membership,
-    COUNTIF(content_type IN ('reel', 'carousel')) AS modash_feed_posts_current_membership
-  FROM modash_posts_current_membership
+    SUM(stories) AS modash_stories_current_membership,
+    SUM(feed_posts) AS modash_feed_posts_current_membership,
+    COALESCE(LOGICAL_AND(IF(completed, met, NULL)), TRUE)
+      AS social_requirement_met,
+    MAX(IF(is_last_month, met, NULL))
+      AS social_requirement_met_last_month,
+    COALESCE(
+      ARRAY_TO_STRING(
+        ARRAY_AGG(
+          IF(met, month_label, NULL) IGNORE NULLS
+          ORDER BY month_start
+        ),
+        ', '
+      ),
+      ''
+    ) AS social_requirement_months_met
+  FROM social_months
   GROUP BY contact_email
 ),
 -- Latest Modash Followers from the Creators CSV. copilot_db.ig_followers
@@ -662,7 +822,11 @@ SELECT
   e.promo_code,
   COALESCE(ps_id.promo_code_status, ps_code.promo_code_status) AS promo_code_status,
   e.discount_id,
-  e.offer_link,
+  IF(
+    TRIM(IFNULL(e.promo_code, '')) = '',
+    e.offer_link,
+    CONCAT('https://othership.us/copilot/intro-offer?id=', TRIM(e.promo_code))
+  ) AS offer_link,
   IF(
     ARRAY_LENGTH(e.ig_handles) > 0,
     ARRAY_TO_STRING(
@@ -730,13 +894,10 @@ SELECT
   IF(
     e.mem_start_date IS NULL OR e.mem_end_date IS NULL,
     FALSE,
-    (
-      COALESCE(mdc.modash_stories_current_membership, 0)
-        >= 4 * GREATEST(DATE_DIFF(e.mem_end_date, e.mem_start_date, MONTH), 1)
-      OR COALESCE(mdc.modash_feed_posts_current_membership, 0)
-        >= GREATEST(DATE_DIFF(e.mem_end_date, e.mem_start_date, MONTH), 1)
-    )
+    COALESCE(mdc.social_requirement_met, FALSE)
   ) AS social_requirement_met,
+  mdc.social_requirement_met_last_month,
+  COALESCE(mdc.social_requirement_months_met, '') AS social_requirement_months_met,
 
   -- Promo redemptions / sales — lifetime pretax (discount_redemption rollup)
   r.redemption_count,
@@ -784,6 +945,24 @@ SELECT
       0
     ) / 100
   ) AS INT64) AS cycle_points,
+  CAST(FLOOR(
+    GREATEST(
+      COALESCE(
+        IF(
+          REGEXP_CONTAINS(
+            UPPER(TRIM(IFNULL(e.region, ''))),
+            r'^(NYC|NY)$|NEW YORK'
+          ),
+          COALESCE(slm.redemption_subtotal_usd_last_month, 0)
+            + COALESCE(intro_lm.intro_offer_subtotal_usd_last_month, 0),
+          COALESCE(slm.redemption_subtotal_cad_last_month, 0)
+            + COALESCE(intro_lm.intro_offer_subtotal_cad_last_month, 0)
+        ),
+        0
+      ),
+      0
+    ) / 100
+  ) AS INT64) AS last_month_points,
   COALESCE(sam.redemption_count_since_membership_end, 0)
     + COALESCE(intro_after.intro_offer_count_since_membership_end, 0)
     AS redemption_count_since_membership_end,
@@ -814,10 +993,14 @@ LEFT JOIN redemptions AS r
   ON r.contact_email = e.contact_email
 LEFT JOIN sales_current_membership AS scm
   ON scm.contact_email = e.contact_email
+LEFT JOIN sales_last_month AS slm
+  ON slm.contact_email = e.contact_email
 LEFT JOIN sales_after_membership AS sam
   ON sam.contact_email = e.contact_email
 LEFT JOIN intro_sales_current_membership AS intro
   ON intro.contact_email = e.contact_email
+LEFT JOIN intro_sales_last_month AS intro_lm
+  ON intro_lm.contact_email = e.contact_email
 LEFT JOIN intro_sales_after_membership AS intro_after
   ON intro_after.contact_email = e.contact_email
 LEFT JOIN modash_stats AS md

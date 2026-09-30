@@ -101,6 +101,35 @@ export function regionForLocation(locationId) {
   return LOCATION_TO_REGION[String(locationId)] ?? null;
 }
 
+export function isKnownCopilotRegion(region) {
+  const normalized = normalizeCopilotRegion(region);
+  return normalized === "TO" || normalized === "NYC";
+}
+
+/** Canonical checkout studio when home studio is missing or in the other region. */
+export function defaultLocationIdForRegion(region) {
+  const normalized = normalizeCopilotRegion(region);
+  if (normalized === "NYC") return LOCATION_IDS.Flatiron;
+  if (normalized === "TO") return LOCATION_IDS.Adelaide;
+  return null;
+}
+
+/**
+ * Checkout location for a program region (copilot_db / application).
+ * Home studio is used only when it already belongs to that region.
+ */
+export function checkoutLocationIdForRegion(region, homeStudio) {
+  const programRegion = normalizeCopilotRegion(region);
+  const homeLocationId = locationIdFromHomeStudio(homeStudio);
+  if (
+    homeLocationId &&
+    regionForLocation(homeLocationId) === programRegion
+  ) {
+    return homeLocationId;
+  }
+  return defaultLocationIdForRegion(programRegion);
+}
+
 export function firstNameOrHey(firstName) {
   return String(firstName || "").trim() || "there";
 }

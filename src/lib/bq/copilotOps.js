@@ -94,40 +94,79 @@ function normalizeCopilotRow(row) {
   };
 }
 
+/**
+ * Pending onboard queue. Emails whose applicant cards are all Rejected
+ * (or Rejected - Contacted) stay out, so the job does not spend an MT
+ * lookup on them. Someone with any other status, or no applicant row, stays.
+ */
 export async function listPendingOnboard() {
   const bigquery = getBigQueryClient();
-  const [rows] = await bigquery.query({
+  const applicants = copilotApplicantsRef();
+  const rejectedOnly = `
+    EXISTS (
+      SELECT 1
+      FROM ${applicants} AS rejected_app
+      WHERE LOWER(TRIM(rejected_app.email)) = LOWER(TRIM(db.contact_email))
+        AND TRIM(rejected_app.email) != ''
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM ${applicants} AS open_app
+      WHERE LOWER(TRIM(open_app.email)) = LOWER(TRIM(db.contact_email))
+        AND LOWER(TRIM(IFNULL(open_app.application_status, ''))) NOT IN (
+          'rejected',
+          'rejected - contacted'
+        )
+    )
+  `;
+  const [countRows] = await bigquery.query({
     query: `
-      SELECT
-        contact_email,
-        first_name,
-        last_name,
-        region,
-        tier,
-        user_id,
-        mt_email,
-        mt_profile_link,
-        promo_code,
-        discount_id,
-        offer_link,
-        ig_handle,
-        status,
-        promoted_at,
-        onboarded_at,
-        acceptance_emailed_at,
-        decision,
-        decision_applied_at,
-        never_again
-      FROM ${copilotDbRef()}
-      WHERE promoted_at IS NOT NULL
-        AND onboarded_at IS NULL
-        AND contact_email IS NOT NULL
-        AND TRIM(contact_email) != ''
-      ORDER BY promoted_at
+      SELECT COUNT(*) AS skipped
+      FROM ${copilotDbRef()} AS db
+      WHERE db.promoted_at IS NOT NULL
+        AND db.onboarded_at IS NULL
+        AND db.contact_email IS NOT NULL
+        AND TRIM(db.contact_email) != ''
+        AND ${rejectedOnly}
     `,
     ...queryOptions(),
   });
-  return (rows || []).map(normalizeCopilotRow);
+  const [rows] = await bigquery.query({
+    query: `
+      SELECT
+        db.contact_email,
+        db.first_name,
+        db.last_name,
+        db.region,
+        db.tier,
+        db.user_id,
+        db.mt_email,
+        db.mt_profile_link,
+        db.promo_code,
+        db.discount_id,
+        db.offer_link,
+        db.ig_handle,
+        db.status,
+        db.promoted_at,
+        db.onboarded_at,
+        db.acceptance_emailed_at,
+        db.decision,
+        db.decision_applied_at,
+        db.never_again
+      FROM ${copilotDbRef()} AS db
+      WHERE db.promoted_at IS NOT NULL
+        AND db.onboarded_at IS NULL
+        AND db.contact_email IS NOT NULL
+        AND TRIM(db.contact_email) != ''
+        AND NOT (${rejectedOnly})
+      ORDER BY db.promoted_at
+    `,
+    ...queryOptions(),
+  });
+  return {
+    rows: (rows || []).map(normalizeCopilotRow),
+    rejectedSkipped: Number(countRows?.[0]?.skipped || 0),
+  };
 }
 
 export async function listExistingPromoCodes() {
@@ -284,6 +323,8 @@ export async function listEvaluationQueue() {
         modash_stories_current_membership,
         modash_feed_posts_current_membership,
         social_requirement_met,
+        social_requirement_met_last_month,
+        social_requirement_months_met,
         membership_name,
         membership_start,
         membership_end,
@@ -537,7 +578,10 @@ export async function listMonthlyEmailCopilots() {
         promo_code,
         offer_link,
         cycle_points,
+        last_month_points,
         social_requirement_met,
+        social_requirement_met_last_month,
+        social_requirement_months_met,
         modash_stories_current_membership,
         modash_feed_posts_current_membership,
         membership_end,

@@ -20,7 +20,11 @@ import {
   titleCaseTier,
 } from "../lib/copilotIdentity.js";
 import { isEmailSendConfigured } from "../lib/email/gmailSend.js";
-import { sendMonthlyEmail } from "../lib/email/monthlyEmail.js";
+import {
+  formatSocialRequirementLine,
+  sendMonthlyEmail,
+} from "../lib/email/monthlyEmail.js";
+import { renderLeaderboardHtml } from "../lib/email/monthlyLeaderboard.js";
 import {
   eventsForRegion,
   queryEventsInDateRange,
@@ -108,12 +112,25 @@ function bqNumber(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
-function bqBool(value) {
+function bqTriBool(value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "object" && value.value != null) return bqTriBool(value.value);
   if (value === true || value === 1) return true;
-  if (value === false || value === 0 || value == null) return false;
-  if (typeof value === "object" && value.value != null) return bqBool(value.value);
+  if (value === false || value === 0) return false;
   const normalized = String(value).trim().toLowerCase();
-  return normalized === "true" || normalized === "yes" || normalized === "1";
+  if (normalized === "true" || normalized === "yes" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "no" || normalized === "0") return false;
+  return null;
+}
+
+function bqBool(value) {
+  return bqTriBool(value) === true;
+}
+
+function bqString(value) {
+  if (value == null || value === "") return "";
+  if (typeof value === "object" && value.value != null) return bqString(value.value);
+  return String(value);
 }
 
 function bqDate(value) {
@@ -218,8 +235,9 @@ export async function emailMonthlyUpdate({
     },
   };
 
-  let rows = await listMonthlyEmailCopilots();
-  const matched = rows.length;
+  const allRows = await listMonthlyEmailCopilots();
+  const matched = allRows.length;
+  let rows = allRows;
 
   if (regionOnly) {
     rows = rows.filter(
@@ -260,9 +278,18 @@ export async function emailMonthlyUpdate({
     const regionKey = isNycRegion(row.region) ? "NYC" : "TO";
     const blocks = shared[regionKey];
     console.log(`\n—— [${i + 1}/${rows.length}] ${personLabel(row)} ——`);
+    const socialRequirementMonthsMet = bqString(
+      row.social_requirement_months_met
+    );
+    const socialRequirementMetLastMonth = bqTriBool(
+      row.social_requirement_met_last_month
+    );
     console.log(
       `   ${regionKey}/${titleCaseTier(row.tier)}  pts=${bqNumber(row.cycle_points)}` +
-        `  social=${bqBool(row.social_requirement_met) ? "yes" : "not yet"}` +
+        `  social=${formatSocialRequirementLine({
+          monthsMet: socialRequirementMonthsMet,
+          lastMonthMet: socialRequirementMetLastMonth,
+        })}` +
         `  membership=${row.membership_status || "—"}` +
         (bqDate(row.membership_end) ? ` end=${bqDate(row.membership_end)}` : "")
     );
@@ -279,14 +306,19 @@ export async function emailMonthlyUpdate({
         offerLink: row.offer_link,
         cyclePoints: bqNumber(row.cycle_points),
         socialRequirementMet: bqBool(row.social_requirement_met),
-        stories: bqNumber(row.modash_stories_current_membership),
-        feedPosts: bqNumber(row.modash_feed_posts_current_membership),
+        socialRequirementMetLastMonth,
+        socialRequirementMonthsMet,
         membershipEnd: bqDate(row.membership_end),
         daysToExpiry: bqNumber(row.days_to_expiry),
         monthLabel: window.monthLabel,
         promoHtml: blocks.promoHtml,
         playgroundHtml: blocks.playgroundHtml,
         publicEventsHtml: blocks.publicEventsHtml,
+        leaderboardHtml: renderLeaderboardHtml({
+          rows: allRows,
+          region: regionKey,
+          recipientEmail: email,
+        }),
         dryRun,
         requireSend: !dryRun,
         printBody: printBodies || i === 0,

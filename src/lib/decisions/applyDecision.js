@@ -637,7 +637,25 @@ async function applySocial(row, { dryRun }) {
   return "nudged_social";
 }
 
-async function applyUpdate(row, { dryRun, patch = {} }) {
+function applyFieldsToRow(row, fields) {
+  if (fields.contact_email) row.contact_email = fields.contact_email;
+  if (fields.first_name) row.first_name = fields.first_name;
+  if (fields.last_name) row.last_name = fields.last_name;
+  if (fields.mt_email) row.mt_email = fields.mt_email;
+  if (fields.user_id) row.user_id = fields.user_id;
+  if (fields.mt_profile_link) row.mt_profile_link = fields.mt_profile_link;
+  if (fields.ig_handle) row.ig_handle = fields.ig_handle;
+  if (fields.ig_url) row.ig_url = fields.ig_url;
+  if (fields.promo_code) row.promo_code = fields.promo_code;
+  if (fields.offer_link) row.offer_link = fields.offer_link;
+}
+
+/**
+ * Write filled yellow Review cells (name, emails, IG, promo) onto copilot_db.
+ * Mutates `row` so a following onboard/renew/upgrade/downgrade uses the new values.
+ * When `stampApplied` is false, does not set decision_applied_at (membership still pending).
+ */
+export async function applyProfilePatch(row, { dryRun, patch = {}, stampApplied = false } = {}) {
   const lookupEmail = fieldEmail(row.contact_email);
   const fields = {};
   const changes = [];
@@ -707,19 +725,23 @@ async function applyUpdate(row, { dryRun, patch = {} }) {
   }
 
   if (!changes.length) {
+    if (!stampApplied) return "";
     console.log("   ⏭️  All update fields already match copilot_db — nothing to change");
-    await updateCopilotByEmail(lookupEmail, { decision_applied_at: "NOW" });
+    if (!dryRun) {
+      await updateCopilotByEmail(lookupEmail, { decision_applied_at: "NOW" });
+    }
     return "updated:no_changes";
   }
 
   if (dryRun) {
+    applyFieldsToRow(row, fields);
     console.log(`   (DRY_RUN: would update ${changes.join("; ")})`);
     if (fields.promo_code && row.discount_id) {
       console.log(
         `   (DRY_RUN: would patch MT discount ${row.discount_id} code → ${fields.promo_code})`,
       );
     }
-    return "updated";
+    return `updated:${changes.join("; ")}`;
   }
 
   if (fields.contact_email) {
@@ -741,9 +763,14 @@ async function applyUpdate(row, { dryRun, patch = {} }) {
 
   await updateCopilotByEmail(lookupEmail, {
     ...fields,
-    decision_applied_at: "NOW",
+    ...(stampApplied ? { decision_applied_at: "NOW" } : {}),
   });
+  applyFieldsToRow(row, fields);
   return `updated:${changes.join("; ")}`;
+}
+
+async function applyUpdate(row, { dryRun, patch = {} }) {
+  return applyProfilePatch(row, { dryRun, patch, stampApplied: true });
 }
 
 export async function applyCopilotDecision(row, { dryRun = false, freezeUntil = "", patch = {} } = {}) {
@@ -752,6 +779,14 @@ export async function applyCopilotDecision(row, { dryRun = false, freezeUntil = 
     String(row.decision || "")
       .trim()
       .toLowerCase();
+  if (["onboard", "renew", "upgrade", "downgrade"].includes(decision)) {
+    const profileResult = await applyProfilePatch(row, {
+      dryRun,
+      patch,
+      stampApplied: false,
+    });
+    if (profileResult) console.log(`   ${profileResult}`);
+  }
   const needsMtAccount = ["onboard", "renew", "upgrade", "downgrade", "freeze"].includes(
     decision,
   );

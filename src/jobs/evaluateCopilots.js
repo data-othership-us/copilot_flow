@@ -12,6 +12,7 @@ import {
 } from "../lib/bq/copilotOps.js";
 import {
   applyCopilotDecision,
+  applyProfilePatch,
   isExpiryHold,
   isPaymentNudgeHold,
   isSocialNudgeHold,
@@ -38,6 +39,18 @@ import {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function reviewProfilePatch(item) {
+  return {
+    newEmail: item.newEmail,
+    mtEmail: item.mtEmail,
+    promoCode: item.promoCode,
+    igHandle: item.igHandle,
+    igUrl: item.igUrl,
+    firstName: item.firstName,
+    lastName: item.lastName,
+  };
 }
 
 function skipApplyRequested() {
@@ -109,6 +122,21 @@ async function applyReadyItems(items, summary, attempted) {
           });
           summary.decisionsIngested++;
         }
+        if (
+          item.decision === "renew" ||
+          item.decision === "upgrade" ||
+          item.decision === "downgrade"
+        ) {
+          const copilot = await getCopilotByEmail(item.email);
+          if (copilot) {
+            const profileResult = await applyProfilePatch(copilot, {
+              dryRun: config.dryRun,
+              patch: reviewProfilePatch(item),
+              stampApplied: false,
+            });
+            if (profileResult) console.log(`   ${profileResult}`);
+          }
+        }
         summary.heldUntilExpiry++;
         continue;
       }
@@ -155,15 +183,7 @@ async function applyReadyItems(items, summary, attempted) {
       const result = await applyCopilotDecision(copilot, {
         dryRun: config.dryRun,
         freezeUntil: item.freezeUntil,
-        patch: {
-          newEmail: item.newEmail,
-          mtEmail: item.mtEmail,
-          promoCode: item.promoCode,
-          igHandle: item.igHandle,
-          igUrl: item.igUrl,
-          firstName: item.firstName,
-          lastName: item.lastName,
-        },
+        patch: reviewProfilePatch(item),
       });
 
       if (isPaymentNudgeHold(result)) {

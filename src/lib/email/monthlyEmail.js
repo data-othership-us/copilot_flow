@@ -132,12 +132,22 @@ function offerLinkHtml(url) {
   return monthlyLink(safe, safe);
 }
 
-function socialCountsLine({ stories, feedPosts } = {}) {
-  const s = Number(stories) || 0;
-  const f = Number(feedPosts) || 0;
-  const storyWord = s === 1 ? "story" : "stories";
-  const feedWord = f === 1 ? "feed post" : "feed posts";
-  return `${s} ${storyWord}, ${f} ${feedWord} this term`;
+function cycleMonthsMetLabel(monthsMet) {
+  const months = String(monthsMet ?? "").trim();
+  return months || "none";
+}
+
+/**
+ * Newsletter Social line: last calendar month, plus months that cleared
+ * 4 stories or 1 reel/carousel in this cycle.
+ */
+export function formatSocialRequirementLine({
+  monthsMet,
+  lastMonthMet,
+} = {}) {
+  const cycle = `This cycle: ${cycleMonthsMetLabel(monthsMet)}`;
+  if (lastMonthMet == null) return cycle;
+  return `Last month: ${lastMonthMet ? "Yes" : "Not yet"} · ${cycle}`;
 }
 
 export function renderMonthlyEmailHtml(input) {
@@ -148,11 +158,10 @@ export function renderMonthlyEmailHtml(input) {
     tier: escapeHtml(tier),
     cyclePoints: escapeHtml(formatPoints(input.cyclePoints)),
     cycleProgress: escapeHtml(cycleProgressLine(input)),
-    socialStatus: input.socialRequirementMet ? "Yes" : "Not yet",
-    socialCounts: escapeHtml(
-      socialCountsLine({
-        stories: input.stories,
-        feedPosts: input.feedPosts,
+    socialStatus: escapeHtml(
+      formatSocialRequirementLine({
+        monthsMet: input.socialRequirementMonthsMet,
+        lastMonthMet: input.socialRequirementMetLastMonth,
       })
     ),
     termRemaining: escapeHtml(formatTermRemaining(input)),
@@ -167,6 +176,7 @@ export function renderMonthlyEmailHtml(input) {
     promoHtml: input.promoHtml || "",
     playgroundHtml: input.playgroundHtml || "",
     publicEventsHtml: input.publicEventsHtml || "",
+    leaderboardHtml: input.leaderboardHtml || "",
     signatureHtml: getEmailSignatureHtml(),
   });
 }
@@ -192,14 +202,15 @@ export function previewMonthlyEmail(input) {
  *   offerLink?: string,
  *   cyclePoints?: number,
  *   socialRequirementMet?: boolean,
- *   stories?: number,
- *   feedPosts?: number,
+ *   socialRequirementMetLastMonth?: boolean|null,
+ *   socialRequirementMonthsMet?: string,
  *   membershipEnd?: string,
  *   daysToExpiry?: number,
  *   monthLabel?: string,
  *   promoHtml?: string,
  *   playgroundHtml?: string,
  *   publicEventsHtml?: string,
+ *   leaderboardHtml?: string,
  *   dryRun?: boolean,
  *   requireSend?: boolean,
  *   printBody?: boolean,

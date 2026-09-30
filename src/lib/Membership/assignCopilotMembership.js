@@ -11,12 +11,12 @@ import {
   restoreParkedCartItems,
 } from "../mt/cartHelpers.js";
 import {
-  locationIdFromHomeStudio,
+  checkoutLocationIdForRegion,
+  isKnownCopilotRegion,
   membershipRegionKey,
   normalizeCopilotRegion,
   normalizeTierKey,
   partnerIdForLocation,
-  regionForLocation,
 } from "../copilotIdentity.js";
 
 /** Parent product IDs from membership_products.json. */
@@ -164,25 +164,23 @@ async function resolveChildMembershipId(tier, regionKey) {
   throw new Error(`No membership product for tier=${tier} region=${regionKey}`);
 }
 
-async function resolveLocationAndPartner({ userId, homeStudio, region }) {
-  let locationId = locationIdFromHomeStudio(homeStudio);
-  if (!locationId && userId) {
-    const user = await mtGet(`/users/${userId}`);
-    const home =
-      user?.data?.relationships?.home_location?.data ||
-      user?.data?.attributes?.home_location?.data ||
-      null;
-    const loc = Array.isArray(home) ? home[0] : home;
-    if (loc?.id) locationId = String(loc.id);
+function resolveLocationAndPartner({ homeStudio, region }) {
+  const programRegion = normalizeCopilotRegion(region);
+  if (!isKnownCopilotRegion(programRegion)) {
+    return { locationId: null, partnerId: null, region: programRegion };
   }
-  const partnerId = partnerIdForLocation(locationId);
-  const resolvedRegion =
-    regionForLocation(locationId) || normalizeCopilotRegion(region);
-  return { locationId, partnerId, region: resolvedRegion };
+  const locationId = checkoutLocationIdForRegion(programRegion, homeStudio);
+  return {
+    locationId,
+    partnerId: partnerIdForLocation(locationId),
+    region: programRegion,
+  };
 }
 
 /**
  * Assign a Co-Pilot membership via MT cart checkout (no charge).
+ * Product region comes from copilot_db / application (`region`), never MT home studio.
+ * Home studio is only the checkout location when it already belongs to that region.
  * Does not terminate a live term. By default skips if one is already live;
  * `allowAlongsideExpiring` adds a new term starting now on expiry day.
  * @returns {Promise<{ skipped?: string, membership?: object }>}
@@ -206,14 +204,13 @@ export async function assignCopilotMembership({
     };
   }
 
-  const resolved = await resolveLocationAndPartner({
-    userId,
+  const resolved = resolveLocationAndPartner({
     homeStudio,
     region,
   });
   if (!resolved.partnerId || !resolved.region) {
     throw new Error(
-      `Could not resolve partner/region for ${email || userId} (studio=${homeStudio || "?"} location=${resolved.locationId || "?"})`
+      `Could not resolve partner/region for ${email || userId} (region=${region || "?"} studio=${homeStudio || "?"} location=${resolved.locationId || "?"})`
     );
   }
 

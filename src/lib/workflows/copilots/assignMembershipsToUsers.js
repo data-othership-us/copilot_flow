@@ -11,25 +11,19 @@ import {
   restoreParkedCartItems,
 } from "../../mt/cartHelpers.js";
 import { mtPost } from "../../mt/marianatekClient.js";
+import { getCopilotByEmail } from "../../bq/copilotOps.js";
+import {
+  checkoutLocationIdForRegion,
+  isKnownCopilotRegion,
+  membershipRegionKey,
+  normalizeCopilotRegion,
+  partnerIdForLocation,
+} from "../../copilotIdentity.js";
 
 const REQUEST_DELAY_MS = Number(process.env.REQUEST_DELAY_MS || 100);
 const DRY_RUN = process.env.DRY_RUN === "1" || process.env.DRY_RUN === "true";
 const OUTPUT_LOG = process.env.OUTPUT_LOG || "membership_log.json";
 const OUTPUT_SUMMARY = process.env.OUTPUT_SUMMARY || "membership_summary.txt";
-
-const LOCATION_TO_PARTNER = {
-  48717: "41362", // Adelaide
-  48750: "41395", // Yorkville
-  48784: "41429", // Flatiron
-  48817: "41462", // Williamsburg
-};
-
-const LOCATION_TO_REGION = {
-  48717: "TO",
-  48750: "TO",
-  48784: "NY",
-  48817: "NY",
-};
 
 const SEEKER_CHILD_PRODUCT_MEMBERSHIPS = {
   TO: "17074",
@@ -119,15 +113,30 @@ function getHomeLocationId(user) {
   return location?.id ? String(location.id) : null;
 }
 
-function resolveRegionAndPartner(user) {
-  const locationId = getHomeLocationId(user);
-  if (!locationId) {
-    return { region: null, partnerId: null, locationId: null };
+async function programRegionForEmail(email) {
+  const fromEnv = normalizeCopilotRegion(process.env.REGION);
+  if (isKnownCopilotRegion(fromEnv)) return fromEnv;
+  try {
+    const row = await getCopilotByEmail(email);
+    const fromDb = normalizeCopilotRegion(row?.region);
+    if (isKnownCopilotRegion(fromDb)) return fromDb;
+  } catch (error) {
+    console.warn(`   ⚠️  copilot_db region lookup failed: ${error.message}`);
   }
+  return null;
+}
 
+function resolveRegionAndPartner(user, programRegion) {
+  if (!isKnownCopilotRegion(programRegion)) {
+    return { region: null, partnerId: null, locationId: getHomeLocationId(user) };
+  }
+  const locationId = checkoutLocationIdForRegion(
+    programRegion,
+    getHomeLocationId(user)
+  );
   return {
-    region: LOCATION_TO_REGION[locationId] ?? null,
-    partnerId: LOCATION_TO_PARTNER[locationId] ?? null,
+    region: membershipRegionKey(programRegion),
+    partnerId: partnerIdForLocation(locationId),
     locationId,
   };
 }
@@ -244,13 +253,19 @@ export async function assignMembershipsToUsers(options = {}) {
 
       const userId = user.id;
       const classCount = getClassCount(user);
-      const { region, partnerId, locationId } = resolveRegionAndPartner(user);
+      const programRegion = await programRegionForEmail(email);
+      const { region, partnerId, locationId } = resolveRegionAndPartner(
+        user,
+        programRegion
+      );
 
       console.log(`   ✅ Account ID: ${userId}`);
       console.log(`   📊 Class count: ${classCount ?? "unknown"}`);
 
       if (!region || !partnerId) {
-        console.log("   ⚠️ Could not determine region/partner from home studio");
+        console.log(
+          "   ⚠️ Could not determine region from copilot_db / REGION (not home studio)"
+        )
         results.skipped.push({
           email,
           userId,
