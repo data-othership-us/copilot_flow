@@ -48,7 +48,8 @@
 --   calendar month (a September email ranks August). Still clipped to the
 --   live Co-Pilot term.
 -- social_requirement_met: every completed calendar month in the term has
---   4 stories or 1 reel/carousel that month (OR, not both). Vacuously true
+--   4 stories or 1 grid post (reel, carousel, post, or video) that month
+--   (OR, not both). Vacuously true
 --   when no month in the term has finished yet. Current in-progress month
 --   is excluded until its last membership day has passed.
 -- social_requirement_met_last_month: previous complete Eastern calendar
@@ -685,7 +686,7 @@ modash_stats AS (
   FROM modash_posts_in_term
   GROUP BY contact_email
 ),
--- Current-term stories vs reel/carousel (grid). Caps at membership_end.
+-- Current-term stories vs grid posts (reel, carousel, post, video). Caps at membership_end.
 modash_posts_current_membership AS (
   SELECT
     e.contact_email,
@@ -710,7 +711,7 @@ modash_posts_by_month AS (
     contact_email,
     DATE_TRUNC(posted_date, MONTH) AS month_start,
     COUNTIF(content_type = 'story') AS stories,
-    COUNTIF(content_type IN ('reel', 'carousel')) AS feed_posts
+    COUNTIF(content_type IN ('reel', 'carousel', 'post', 'video')) AS feed_posts
   FROM modash_posts_current_membership
   GROUP BY contact_email, month_start
 ),

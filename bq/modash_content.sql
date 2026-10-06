@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.copilots.modash_content` (
   channel STRING,                  -- INSTAGRAM
   influencer STRING NOT NULL,      -- CSV "Influencer" e.g. @jkmckay
   ig_handle STRING,                -- normalize_ig_handle(influencer); bot may set this
-  content_type STRING NOT NULL,    -- story | reel | carousel (lowercase)
+  content_type STRING NOT NULL,    -- story | reel | carousel | post | video (lowercase)
   posted_at TIMESTAMP NOT NULL,    -- CSV "Posting date (ISO 8601)"
   link_to_post STRING,             -- empty for most stories
   preview_link STRING,

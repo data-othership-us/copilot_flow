@@ -199,7 +199,7 @@ Scheduled email to every **active** copilot with a **live Co-Pilot membership** 
 
 - **Promo** — Ready rows for that month in the [Co-Pilot Monthly Promos](https://app.notion.com/p/9d4abbed5e94442d95a2699ead116776) Notion database (`All` / `NYC` / `TO`). Check **Ready** when the copy is good to send.
 - **Events** — same Global Events Calendar cut as `event-automations` monthly lists: Social Playgrounds (Co-Pilot only, linked from the calendar **Public Link** field — never the Notion page) plus public specials. NYC copilots get Flatiron / Williamsburg; TO copilots get Adelaide / Yorkville. Dates already in the past are skipped.
-- **Social** — whether last calendar month was Met or Not Met (4 stories or 1 reel/carousel)
+- **Social** — whether last calendar month was Met or Not Met (4 stories or 1 grid post: reel, carousel, post, or video)
 - **Reminder** — monthly social ask (4 stories or 1 feed post)
 - **The board** — top 3 in that copilot's region (NYC or TO) by last month's points. First name + last initial only; no totals or personal rank.
 
