@@ -179,8 +179,17 @@ function offerLinkHtml(url) {
   return monthlyLink(safe, safe);
 }
 
-/** Newsletter Social line: whether last calendar month cleared the bar. */
-export function formatSocialRequirementLine({ lastMonthMet } = {}) {
+/**
+ * Newsletter Social line: each membership interval that has started.
+ * "Jul 16 to Aug 15 Met. Aug 16 to Sep 15 Not met. Sep 16 to Oct 15 In progress."
+ */
+export function formatSocialRequirementLine({
+  intervals,
+  monthsMet,
+  lastMonthMet,
+} = {}) {
+  const text = String(intervals || monthsMet || "").trim();
+  if (text) return text;
   if (lastMonthMet == null) return "—";
   return lastMonthMet ? "Met last month" : "Not Met last month";
 }
@@ -196,6 +205,7 @@ export function renderMonthlyEmailHtml(input) {
     promoProductsParen: escapeHtml(products ? ` (${products})` : ""),
     socialStatus: escapeHtml(
       formatSocialRequirementLine({
+        intervals: input.socialRequirementMonthsMet,
         lastMonthMet: input.socialRequirementMetLastMonth,
       })
     ),

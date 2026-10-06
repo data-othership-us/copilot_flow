@@ -28,7 +28,8 @@
 --       Join: contact_email ↔ creator email_raw, else split_ig_handles
 --       (ops sheets may list several IG accounts in one cell).
 --       Campaign impressions since the latest Co-Pilot membership start.
---       Current-term stories / feed posts, scored per Eastern calendar month.
+--       Current-term stories / feed posts, scored per membership month
+--       (anniversary intervals from membership_start, clipped to membership_end).
 --       modash_followers from Creators CSV. View ig_followers =
 --       COALESCE(modash_followers, copilot_db seed). Not written back to copilot_db.
 --
@@ -47,15 +48,17 @@
 -- last_month_points: same formula for the previous complete Eastern
 --   calendar month (a September email ranks August). Still clipped to the
 --   live Co-Pilot term.
--- social_requirement_met: every completed calendar month in the term has
---   4 stories or 1 grid post (reel, carousel, post, or video) that month
---   (OR, not both). Vacuously true
---   when no month in the term has finished yet. Current in-progress month
---   is excluded until its last membership day has passed.
--- social_requirement_met_last_month: previous complete Eastern calendar
---   month (NULL if that month is outside the term).
--- social_requirement_months_met: month names in the term that already
---   cleared the bar, including the current month if they already posted.
+-- social_requirement_met: every completed membership interval has
+--   4 stories or 1 grid post (reel, carousel, post, or video) in that
+--   interval (OR, not both). Intervals are monthly from membership_start
+--   (Jul 16 start → Jul 16–Aug 15, Aug 16–Sep 15, …) clipped to
+--   membership_end. Vacuously true when no interval has finished yet.
+--   The in-progress interval is excluded until its last day has passed.
+-- social_requirement_met_last_month: the most recently completed
+--   membership interval (NULL if none has finished).
+-- social_requirement_months_met: each started interval with Met,
+--   Not met, or In progress. A current interval that already cleared
+--   the bar is Met.
 -- Current-term stories / feed posts: posted_at in [membership_start, membership_end].
 -- Modash impressions: posted_at >= latest Co-Pilot membership start.
 --
@@ -706,75 +709,101 @@ modash_posts_current_membership AS (
   WHERE `YOUR_PROJECT.copilots.normalize_ig_handle`(p.influencer) IS NOT NULL
   GROUP BY e.contact_email, p.content_key
 ),
-modash_posts_by_month AS (
-  SELECT
-    contact_email,
-    DATE_TRUNC(posted_date, MONTH) AS month_start,
-    COUNTIF(content_type = 'story') AS stories,
-    COUNTIF(content_type IN ('reel', 'carousel', 'post', 'video')) AS feed_posts
-  FROM modash_posts_current_membership
-  GROUP BY contact_email, month_start
-),
--- Eastern calendar months overlapping the term through today.
-membership_calendar_months AS (
+-- Monthly anniversary intervals inside the current term. Jul 16 start →
+-- Jul 16–Aug 15, Aug 16–Sep 15, clipped to membership_end. Only intervals
+-- that have already started.
+membership_intervals AS (
   SELECT
     e.contact_email,
-    e.mem_end_date,
-    month_start
+    interval_start,
+    LEAST(
+      DATE_SUB(DATE_ADD(interval_start, INTERVAL 1 MONTH), INTERVAL 1 DAY),
+      e.mem_end_date
+    ) AS interval_end
   FROM enriched AS e,
     UNNEST(
       GENERATE_DATE_ARRAY(
-        DATE_TRUNC(e.mem_start_date, MONTH),
-        DATE_TRUNC(
-          LEAST(e.mem_end_date, CURRENT_DATE('America/New_York')),
-          MONTH
-        ),
+        e.mem_start_date,
+        LEAST(e.mem_end_date, CURRENT_DATE('America/New_York')),
         INTERVAL 1 MONTH
       )
-    ) AS month_start
+    ) AS interval_start
   WHERE e.mem_start_date IS NOT NULL
     AND e.mem_end_date IS NOT NULL
+    AND e.mem_start_date <= e.mem_end_date
     AND REGEXP_CONTAINS(LOWER(IFNULL(e.mem_name, '')), r'co[\s-]?pilot')
-    AND DATE_TRUNC(e.mem_start_date, MONTH)
-      <= DATE_TRUNC(
-        LEAST(e.mem_end_date, CURRENT_DATE('America/New_York')),
-        MONTH
-      )
+    AND interval_start <= e.mem_end_date
 ),
-social_months AS (
+social_intervals AS (
   SELECT
-    m.contact_email,
-    m.month_start,
-    COALESCE(p.stories, 0) AS stories,
-    COALESCE(p.feed_posts, 0) AS feed_posts,
+    i.contact_email,
+    i.interval_start,
+    i.interval_end,
+    COALESCE(COUNTIF(p.content_type = 'story'), 0) AS stories,
+    COALESCE(
+      COUNTIF(p.content_type IN ('reel', 'carousel', 'post', 'video')),
+      0
+    ) AS feed_posts,
     (
-      COALESCE(p.stories, 0) >= 4
-      OR COALESCE(p.feed_posts, 0) >= 1
+      COALESCE(COUNTIF(p.content_type = 'story'), 0) >= 4
+      OR COALESCE(
+        COUNTIF(p.content_type IN ('reel', 'carousel', 'post', 'video')),
+        0
+      ) >= 1
     ) AS met,
-    LEAST(
-      DATE_SUB(DATE_ADD(m.month_start, INTERVAL 1 MONTH), INTERVAL 1 DAY),
-      m.mem_end_date
-    ) < CURRENT_DATE('America/New_York') AS completed,
-    m.month_start = DATE_SUB(
-      DATE_TRUNC(CURRENT_DATE('America/New_York'), MONTH),
-      INTERVAL 1 MONTH
-    ) AS is_last_month,
-    FORMAT_DATE(
+    i.interval_end < CURRENT_DATE('America/New_York') AS completed
+  FROM membership_intervals AS i
+  LEFT JOIN modash_posts_current_membership AS p
+    ON p.contact_email = i.contact_email
+   AND p.posted_date BETWEEN i.interval_start AND i.interval_end
+  GROUP BY i.contact_email, i.interval_start, i.interval_end
+),
+social_intervals_labeled AS (
+  SELECT
+    contact_email,
+    interval_start,
+    stories,
+    feed_posts,
+    met,
+    completed,
+    completed
+      AND interval_start = MAX(IF(completed, interval_start, NULL)) OVER (
+        PARTITION BY contact_email
+      ) AS is_last_interval,
+    CONCAT(
+      FORMAT_DATE('%b ', interval_start),
+      CAST(EXTRACT(DAY FROM interval_start) AS STRING),
       IF(
-        MIN(EXTRACT(YEAR FROM m.month_start)) OVER (
-          PARTITION BY m.contact_email
-        ) != MAX(EXTRACT(YEAR FROM m.month_start)) OVER (
-          PARTITION BY m.contact_email
-        ),
-        '%B %Y',
-        '%B'
+        show_year,
+        CONCAT(', ', CAST(EXTRACT(YEAR FROM interval_start) AS STRING)),
+        ''
       ),
-      m.month_start
-    ) AS month_label
-  FROM membership_calendar_months AS m
-  LEFT JOIN modash_posts_by_month AS p
-    ON p.contact_email = m.contact_email
-   AND p.month_start = m.month_start
+      ' to ',
+      FORMAT_DATE('%b ', interval_end),
+      CAST(EXTRACT(DAY FROM interval_end) AS STRING),
+      IF(
+        show_year,
+        CONCAT(', ', CAST(EXTRACT(YEAR FROM interval_end) AS STRING)),
+        ''
+      ),
+      ' ',
+      CASE
+        WHEN met THEN 'Met'
+        WHEN completed THEN 'Not met'
+        ELSE 'In progress'
+      END
+    ) AS interval_label
+  FROM (
+    SELECT
+      *,
+      EXTRACT(YEAR FROM interval_start) != EXTRACT(YEAR FROM interval_end)
+        OR MIN(EXTRACT(YEAR FROM interval_start)) OVER (
+          PARTITION BY contact_email
+        ) != MAX(EXTRACT(YEAR FROM interval_end)) OVER (
+          PARTITION BY contact_email
+        ) AS show_year
+    FROM social_intervals
+  )
 ),
 modash_current_stats AS (
   SELECT
@@ -783,19 +812,16 @@ modash_current_stats AS (
     SUM(feed_posts) AS modash_feed_posts_current_membership,
     COALESCE(LOGICAL_AND(IF(completed, met, NULL)), TRUE)
       AS social_requirement_met,
-    MAX(IF(is_last_month, met, NULL))
+    MAX(IF(is_last_interval, met, NULL))
       AS social_requirement_met_last_month,
     COALESCE(
       ARRAY_TO_STRING(
-        ARRAY_AGG(
-          IF(met, month_label, NULL) IGNORE NULLS
-          ORDER BY month_start
-        ),
-        ', '
+        ARRAY_AGG(interval_label ORDER BY interval_start),
+        '. '
       ),
       ''
     ) AS social_requirement_months_met
-  FROM social_months
+  FROM social_intervals_labeled
   GROUP BY contact_email
 ),
 -- Latest Modash Followers from the Creators CSV. copilot_db.ig_followers
