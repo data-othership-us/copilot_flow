@@ -415,9 +415,98 @@ export function getSheetsClient() {
     scopes: [
       "https://www.googleapis.com/auth/spreadsheets",
       "https://www.googleapis.com/auth/drive",
+      "https://www.googleapis.com/auth/bigquery.readonly",
     ],
   });
   return google.sheets({ version: "v4", auth });
+}
+
+function dataSourceColumnNames(sheet) {
+  return (sheet?.properties?.dataSourceSheetProperties?.columns || [])
+    .map((c) => c.reference?.name)
+    .filter(Boolean);
+}
+
+async function waitForDataSourceRefresh(
+  sheets,
+  spreadsheetId,
+  title,
+  { timeoutMs = 120000, intervalMs = 3000 } = {},
+) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const sheet = (meta.data.sheets || []).find(
+      (s) => s.properties?.title === title,
+    );
+    const status = sheet?.properties?.dataSourceSheetProperties?.dataExecutionStatus;
+    const state = String(status?.state || "");
+    if (state === "SUCCEEDED") return { sheet, status };
+    if (state === "FAILED") {
+      throw new Error(status?.errorCode || status?.errorMessage || "FAILED");
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error("timed out waiting for Connected Sheet refresh");
+}
+
+/**
+ * Reconnect the BigQuery Connected Sheet preview so new view columns
+ * (last-month social, months met) show up next to the existing schema.
+ */
+export async function refreshPerformanceConnectedSheet() {
+  const sheets = getSheetsClient();
+  const id = sheetId();
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: id });
+  const title = "copilot_performance";
+  const sheet = (meta.data.sheets || []).find(
+    (s) =>
+      s.properties?.title === title && s.properties?.sheetType === "DATA_SOURCE",
+  );
+  const dataSource = (meta.data.dataSources || []).find(
+    (d) =>
+      d.spec?.bigQuery?.tableSpec?.tableId === "copilot_performance" ||
+      d.dataSourceId ===
+        sheet?.properties?.dataSourceSheetProperties?.dataSourceId,
+  );
+  if (!sheet || !dataSource?.dataSourceId) {
+    console.log("   (no copilot_performance Connected Sheet — skip)");
+    return { refreshed: false };
+  }
+
+  const before = dataSourceColumnNames(sheet);
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: id,
+    requestBody: {
+      requests: [
+        {
+          updateDataSource: {
+            dataSource: {
+              dataSourceId: dataSource.dataSourceId,
+              spec: dataSource.spec,
+            },
+            fields: "spec",
+          },
+        },
+        {
+          refreshDataSource: {
+            dataSourceId: dataSource.dataSourceId,
+            force: true,
+          },
+        },
+      ],
+    },
+  });
+
+  const { sheet: next } = await waitForDataSourceRefresh(sheets, id, title);
+  const after = dataSourceColumnNames(next);
+  const added = after.filter((name) => !before.includes(name));
+  console.log(
+    `   copilot_performance Connected Sheet refreshed (${after.length} cols` +
+      (added.length ? `; added ${added.join(", ")}` : "") +
+      ")",
+  );
+  return { refreshed: true, columns: after, added };
 }
 
 function fmtTs(value) {

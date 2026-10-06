@@ -1,8 +1,10 @@
 import { config } from "../../config.js";
 import {
   monthlyEventLine,
+  monthlyEventList,
   monthlyLink,
   monthlyLocationHeading,
+  monthlyLocationLink,
   monthlyNote,
   monthlySectionHeading,
 } from "../email/monthlyLayout.js";
@@ -33,6 +35,13 @@ const LOCATION_SECTION_ORDER = [
   "Flatiron",
   "Williamsburg",
 ];
+
+const LOCATION_SCHEDULE_URLS = {
+  Adelaide: "https://www.othership.us/schedule?_mt=%2Fschedule%3Flocations%3D48717",
+  Yorkville: "https://www.othership.us/schedule?_mt=%2Fschedule%3Flocations%3D48750",
+  Flatiron: "https://www.othership.us/schedule?_mt=%2Fschedule%3Flocations%3D48784",
+  Williamsburg: "https://www.othership.us/schedule?_mt=%2Fschedule%3Flocations%3D48817",
+};
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -267,11 +276,20 @@ export async function queryEventsInDateRange(startDate, endDate) {
   return pages;
 }
 
+function stripEventEmoji(value) {
+  return String(value ?? "")
+    .replace(/\p{Extended_Pictographic}/gu, "")
+    .replace(/[\uFE0F\u200D]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function titleLine(event) {
+  const name = stripEventEmoji(event.name);
   const when = formatOrdinalDay(event.date);
   const times = timeRange(event);
-  if (times) return `${event.name} — ${when} ${times}`;
-  return `${event.name} — ${when}`;
+  if (times) return `${name} — ${when} ${times}`;
+  return `${name} — ${when}`;
 }
 
 function groupByLocation(events) {
@@ -292,7 +310,14 @@ function groupByLocation(events) {
   return groups;
 }
 
-function renderEventGroupHtml(events) {
+function locationHeading(loc, { linkLocations = false } = {}) {
+  const name = escapeHtml(loc);
+  const href = linkLocations ? LOCATION_SCHEDULE_URLS[loc] : "";
+  if (!href) return monthlyLocationHeading(name);
+  return monthlyLocationHeading(monthlyLocationLink(escapeHtml(href), name));
+}
+
+function renderEventGroupHtml(events, { linkLocations = false } = {}) {
   const groups = groupByLocation(events);
   const parts = [];
   for (const loc of [
@@ -301,16 +326,18 @@ function renderEventGroupHtml(events) {
   ]) {
     const list = groups.get(loc) || [];
     if (!list.length) continue;
-    parts.push(monthlyLocationHeading(escapeHtml(loc)));
+    parts.push(locationHeading(loc, { linkLocations }));
+    const lines = [];
     for (const event of list) {
       const link = publicSignupUrl(event);
       const title = escapeHtml(titleLine(event));
       if (isSocialPlayground(event) && link) {
-        parts.push(monthlyEventLine(monthlyLink(escapeHtml(link), title)));
+        lines.push(monthlyEventLine(monthlyLink(escapeHtml(link), title)));
       } else {
-        parts.push(monthlyEventLine(title));
+        lines.push(monthlyEventLine(title));
       }
     }
+    parts.push(monthlyEventList(lines.join("\n")));
   }
   return parts.join("\n");
 }
@@ -332,10 +359,8 @@ export function renderPublicEventsHtml(events) {
   if (!publics.length) return "";
   return [
     monthlySectionHeading("Public events"),
-    monthlyNote(
-      "Feel free to share these with your community. Some need special event credits rather than Co-Pilot passes."
-    ),
-    renderEventGroupHtml(publics),
+    monthlyNote("Feel free to share these with your community."),
+    renderEventGroupHtml(publics, { linkLocations: true }),
   ].join("\n");
 }
 

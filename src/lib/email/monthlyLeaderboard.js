@@ -81,7 +81,7 @@ export function rankRegionByMonthlyPoints(rows, region) {
 
 function rowStyle(highlight) {
   const weight = highlight ? "700" : "400";
-  return `padding:3px 0;font-family:${FONT};font-size:14px;line-height:1.4;color:${BRAND.eggplant};font-weight:${weight};`;
+  return `padding:3px 0;font-family:${FONT};font-size:15px;line-height:1.5;color:${BRAND.eggplant};font-weight:${weight};`;
 }
 
 function renderRows(visible, recipientEmail) {

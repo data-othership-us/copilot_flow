@@ -15,9 +15,10 @@
 --       copilot_db.promo_code is not rewritten. View offer_link is rebuilt from
 --       that live code (intro-offer?id=). Stored copilot_db.offer_link is used
 --       only when there is no code.
---   - all_time_data.order_all_time_tax via stg_mt_discounts.attr_name
---       (promo-attributed orders in the current membership term; subtotal_pretax;
---       plus redemption_count_since_membership_end after membership_end)
+--   - data-pipeline stg_mt_orders via stg_mt_discounts.attr_name
+--       (completed promo-attributed orders in the current membership term;
+--       pretax is attr_subtotal; plus redemption_count_since_membership_end
+--       after membership_end)
 --   - copilots.copilot_utm_sessions (US snapshot of
 --       data-dashboard-463217.utm_tracking.copilot_utm_sessions)
 --       Individual offer-link sessions (utm_content = promo_code) joined to
@@ -422,6 +423,21 @@ copilot_discount_name AS (
   WHERE COALESCE(d_id.discount_name, d_code.discount_name) IS NOT NULL
     AND e.mem_start IS NOT NULL
 ),
+-- Completed promo orders from Mariana Tek. Discount name is normalized the
+-- same way as copilot_monthly_promo_sales so spacing does not drop a match.
+mt_promo_orders AS (
+  SELECT
+    o.order_id,
+    UPPER(o.attr_currency) AS currency,
+    CAST(o.attr_subtotal AS FLOAT64) AS subtotal_pretax,
+    DATE(o.attr_date_placed, 'America/New_York') AS order_date,
+    REGEXP_REPLACE(TRIM(JSON_VALUE(d, '$.name')), r'\s+', ' ') AS discount_name
+  FROM `data-pipeline-492715.stg_mt.stg_mt_orders` AS o,
+    UNNEST(JSON_QUERY_ARRAY(o.attr_discounts)) AS d
+  WHERE IFNULL(o.attr_contains_refund, FALSE) = FALSE
+    AND LOWER(IFNULL(o.attr_status, '')) = 'completed'
+    AND TRIM(IFNULL(JSON_VALUE(d, '$.name'), '')) != ''
+),
 -- Promo-attributed orders (buyer used this copilot's discount) in the
 -- latest Co-Pilot membership term (Eastern start date through end date).
 promo_orders_since AS (
@@ -429,19 +445,17 @@ promo_orders_since AS (
     cdn.contact_email,
     o.order_id,
     o.currency,
-    CAST(o.subtotal_pretax AS FLOAT64) AS subtotal_pretax
+    o.subtotal_pretax
   FROM copilot_discount_name AS cdn
   JOIN enriched AS e
     ON e.contact_email = cdn.contact_email
-  JOIN `data-dashboard-463217.all_time_data.order_all_time_tax` AS o
+  JOIN mt_promo_orders AS o
     ON e.mem_start_date IS NOT NULL
    AND REGEXP_CONTAINS(LOWER(IFNULL(e.mem_name, '')), r'co[\s-]?pilot')
-   AND DATE(o.purchase_time, 'America/New_York') >= e.mem_start_date
-   AND DATE(o.purchase_time, 'America/New_York')
+   AND o.order_date >= e.mem_start_date
+   AND o.order_date
      <= COALESCE(e.mem_end_date, CURRENT_DATE('America/New_York'))
-   AND IFNULL(o.contains_refund, FALSE) = FALSE
-  JOIN UNNEST(o.discount_name) AS discount_name_item
-  WHERE discount_name_item = cdn.discount_name
+   AND o.discount_name = REGEXP_REPLACE(TRIM(cdn.discount_name), r'\s+', ' ')
 ),
 sales_current_membership AS (
   SELECT
@@ -459,23 +473,21 @@ promo_orders_last_month AS (
     cdn.contact_email,
     o.order_id,
     o.currency,
-    CAST(o.subtotal_pretax AS FLOAT64) AS subtotal_pretax
+    o.subtotal_pretax
   FROM copilot_discount_name AS cdn
   JOIN enriched AS e
     ON e.contact_email = cdn.contact_email
-  JOIN `data-dashboard-463217.all_time_data.order_all_time_tax` AS o
+  JOIN mt_promo_orders AS o
     ON e.mem_start_date IS NOT NULL
    AND REGEXP_CONTAINS(LOWER(IFNULL(e.mem_name, '')), r'co[\s-]?pilot')
-   AND DATE(o.purchase_time, 'America/New_York') >= e.mem_start_date
-   AND DATE(o.purchase_time, 'America/New_York')
+   AND o.order_date >= e.mem_start_date
+   AND o.order_date
      <= COALESCE(e.mem_end_date, CURRENT_DATE('America/New_York'))
-   AND DATE(o.purchase_time, 'America/New_York')
+   AND o.order_date
      >= DATE_SUB(DATE_TRUNC(CURRENT_DATE('America/New_York'), MONTH), INTERVAL 1 MONTH)
-   AND DATE(o.purchase_time, 'America/New_York')
+   AND o.order_date
      < DATE_TRUNC(CURRENT_DATE('America/New_York'), MONTH)
-   AND IFNULL(o.contains_refund, FALSE) = FALSE
-  JOIN UNNEST(o.discount_name) AS discount_name_item
-  WHERE discount_name_item = cdn.discount_name
+   AND o.discount_name = REGEXP_REPLACE(TRIM(cdn.discount_name), r'\s+', ' ')
 ),
 sales_last_month AS (
   SELECT
@@ -493,12 +505,10 @@ promo_orders_after_end AS (
   FROM copilot_discount_name AS cdn
   JOIN enriched AS e
     ON e.contact_email = cdn.contact_email
-  JOIN `data-dashboard-463217.all_time_data.order_all_time_tax` AS o
+  JOIN mt_promo_orders AS o
     ON e.mem_end_date IS NOT NULL
-   AND DATE(o.purchase_time, 'America/New_York') > e.mem_end_date
-   AND IFNULL(o.contains_refund, FALSE) = FALSE
-  JOIN UNNEST(o.discount_name) AS discount_name_item
-  WHERE discount_name_item = cdn.discount_name
+   AND o.order_date > e.mem_end_date
+   AND o.discount_name = REGEXP_REPLACE(TRIM(cdn.discount_name), r'\s+', ' ')
 ),
 sales_after_membership AS (
   SELECT

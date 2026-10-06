@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "../../config.js";
 import { CYCLE_STAY_POINTS, TIER_BENEFITS } from "../coPilotConstants.js";
+import productsData from "../Discount/discountProducts.json" assert { type: "json" };
 import {
   firstNameOrHey,
   isNycRegion,
@@ -70,26 +71,72 @@ export function monthlySubject(monthLabel, region) {
   return `🚀 ${city} ${monthLabel} Co-Pilot Monthly Update 🚀`;
 }
 
-export function cycleProgressLine({ cyclePoints, tier } = {}) {
-  const points = Number(cyclePoints) || 0;
-  const stay = CYCLE_STAY_POINTS[normalizeTierKey(tier)] ?? CYCLE_STAY_POINTS.seeker;
-  const upgrade = nextTier(tier);
-  const upgradeStay = upgrade
-    ? CYCLE_STAY_POINTS[normalizeTierKey(upgrade)]
-    : null;
+function englishList(items) {
+  const list = items.filter(Boolean);
+  if (list.length <= 1) return list.join("");
+  if (list.length === 2) return `${list[0]} and ${list[1]}`;
+  return `${list.slice(0, -1).join(", ")}, and ${list[list.length - 1]}`;
+}
 
-  if (upgradeStay != null && points >= upgradeStay) {
-    return `on track for ${upgrade} (${upgradeStay}+)`;
+function productLabel(title) {
+  return String(title || "")
+    .replace(/^(NY|Toronto)\s+/i, "")
+    .replace(/\s+\$\d+(?:\.\d+)?/, "")
+    .trim();
+}
+
+function pointsPhrase(count) {
+  const n = Math.max(0, Math.round(Number(count) || 0));
+  return `${n} more ${n === 1 ? "point" : "points"}`;
+}
+
+/**
+ * Points on the newsletter: how many remain to stay in this tier, or, once
+ * that bar is met, how many remain to the next tier. Luminary has no next tier.
+ */
+export function cycleProgressLine({ cyclePoints, tier } = {}) {
+  const points = Math.round(Number(cyclePoints) || 0);
+  const key = normalizeTierKey(tier);
+  const stay = CYCLE_STAY_POINTS[key] ?? CYCLE_STAY_POINTS.seeker;
+  if (points < stay) {
+    return `${points} (${pointsPhrase(stay - points)} to stay in ${titleCaseTier(tier)})`;
   }
-  if (points >= stay) {
-    if (upgradeStay != null) {
-      const more = upgradeStay - points;
-      return `on track to stay in ${titleCaseTier(tier)}; ${more} more to ${upgrade}`;
+  const upgrade = nextTier(tier);
+  if (!upgrade) return `${points} (top tier)`;
+  const upgradeStay =
+    CYCLE_STAY_POINTS[normalizeTierKey(upgrade)] ?? CYCLE_STAY_POINTS.wayfinder;
+  return `${points} (${pointsPhrase(upgradeStay - points)} to the next tier)`;
+}
+
+/**
+ * Products the regional Co-Pilot code covers, from the discount catalog.
+ */
+export function formatPromoProductsLine(region) {
+  const products = isNycRegion(region) ? productsData.nyc : productsData.toronto;
+  const packs = [];
+  const others = [];
+  let classPacks = true;
+  for (const product of products || []) {
+    const name = productLabel(product.title);
+    const pack = name.match(/^(\d+)\s+(Class\s+)?Pack$/i);
+    if (pack) {
+      packs.push(Number(pack[1]));
+      if (!pack[2]) classPacks = false;
+      continue;
     }
-    return `on track to stay in ${titleCaseTier(tier)}`;
+    if (name) others.push(name.toLowerCase());
   }
-  const more = stay - points;
-  return `${more} more point${more === 1 ? "" : "s"} to stay in ${titleCaseTier(tier)}`;
+  packs.sort((a, b) => a - b);
+  const packWord = classPacks ? "class packs" : "packs";
+  const packPhrase = packs.length
+    ? `the ${englishList(packs.map(String))} ${packWord}`
+    : "";
+  const named = others.filter(Boolean);
+  const phrase = named.length
+    ? englishList([...named, packPhrase].filter(Boolean))
+    : packPhrase;
+  if (!phrase) return "";
+  return named.length ? `Applies to the ${phrase}.` : `Applies to ${phrase}.`;
 }
 
 export function formatTermRemaining({ membershipEnd, daysToExpiry } = {}) {
@@ -132,35 +179,23 @@ function offerLinkHtml(url) {
   return monthlyLink(safe, safe);
 }
 
-function cycleMonthsMetLabel(monthsMet) {
-  const months = String(monthsMet ?? "").trim();
-  return months || "none";
-}
-
-/**
- * Newsletter Social line: last calendar month, plus months that cleared
- * 4 stories or 1 reel/carousel in this cycle.
- */
-export function formatSocialRequirementLine({
-  monthsMet,
-  lastMonthMet,
-} = {}) {
-  const cycle = `This cycle: ${cycleMonthsMetLabel(monthsMet)}`;
-  if (lastMonthMet == null) return cycle;
-  return `Last month: ${lastMonthMet ? "Yes" : "Not yet"} · ${cycle}`;
+/** Newsletter Social line: whether last calendar month cleared the bar. */
+export function formatSocialRequirementLine({ lastMonthMet } = {}) {
+  if (lastMonthMet == null) return "—";
+  return lastMonthMet ? "Met last month" : "Not Met last month";
 }
 
 export function renderMonthlyEmailHtml(input) {
   const tier = titleCaseTier(input.tier);
+  const products = formatPromoProductsLine(input.region);
   return renderTemplateFile(path.join(emailsDir, "monthly.html"), {
     firstName: firstNameOrHey(input.firstName),
     monthLabel: escapeHtml(input.monthLabel || ""),
     tier: escapeHtml(tier),
-    cyclePoints: escapeHtml(formatPoints(input.cyclePoints)),
-    cycleProgress: escapeHtml(cycleProgressLine(input)),
+    cyclePointsLine: escapeHtml(cycleProgressLine(input)),
+    promoProductsParen: escapeHtml(products ? ` (${products})` : ""),
     socialStatus: escapeHtml(
       formatSocialRequirementLine({
-        monthsMet: input.socialRequirementMonthsMet,
         lastMonthMet: input.socialRequirementMetLastMonth,
       })
     ),
@@ -289,5 +324,6 @@ export async function sendMonthlyEmail(input) {
     detail,
     subject,
     messageId: result.messageId,
+    to: result.to,
   };
 }

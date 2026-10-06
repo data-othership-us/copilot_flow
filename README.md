@@ -180,6 +180,7 @@ Dedup: one row per email; prefer **`active` over `inactive`**, then `ORDER BY ti
 | `npm run find-reservations`    | Report future reservations for terminating memberships                                                             |
 | `npm run email-resubmit-handles` | One-time: email active copilots with a live Co-Pilot membership whose IG is **re-submit**                        |
 | `npm run email-monthly`            | Monthly update: cycle stats, Notion promo, Social Playgrounds + public events (per region)                      |
+| `npm run report-monthly-sales`     | Monthly promo-code and 2-for-1 sales, printed and written to the Copilot base **Monthly sales** tab            |
 
 ### Resubmit social handles (one-time)
 
@@ -197,8 +198,8 @@ DRY_RUN=0 npm run email-resubmit-handles -- --apply
 Scheduled email to every **active** copilot with a **live Co-Pilot membership** (`active` / `pending` / `payment_failure`). Personal cycle stats come from `copilot_performance`. Shared sections:
 
 - **Promo** — Ready rows for that month in the [Co-Pilot Monthly Promos](https://app.notion.com/p/9d4abbed5e94442d95a2699ead116776) Notion database (`All` / `NYC` / `TO`). Check **Ready** when the copy is good to send.
-- **Events** — same Global Events Calendar cut as `event-automations` monthly lists: Social Playgrounds (Co-Pilot only, linked from the calendar **Public Link** field — never the Notion page) plus public specials. NYC copilots get Flatiron / Williamsburg; TO copilots get Adelaide / Yorkville. Dates already in the past are skipped. Public events note that some need special credits, not Co-Pilot passes.
-- **Social** — last calendar month yes/not yet, plus months in this cycle that hit 4 stories or 1 reel/carousel (`July, August` / `none`)
+- **Events** — same Global Events Calendar cut as `event-automations` monthly lists: Social Playgrounds (Co-Pilot only, linked from the calendar **Public Link** field — never the Notion page) plus public specials. NYC copilots get Flatiron / Williamsburg; TO copilots get Adelaide / Yorkville. Dates already in the past are skipped.
+- **Social** — whether last calendar month was Met or Not Met (4 stories or 1 reel/carousel)
 - **Reminder** — monthly social ask (4 stories or 1 feed post)
 - **The board** — top 3 in that copilot's region (NYC or TO) by last month's points. First name + last initial only; no totals or personal rank.
 
@@ -211,7 +212,26 @@ REGION=NYC DRY_RUN=1 npm run email-monthly
 DRY_RUN=0 npm run email-monthly -- --apply
 ```
 
+Each successful send is stored in `copilot_monthly_email_sends` by contact email and month. A later run for that same month skips those people. The job also records anyone already in the Co-Pilot sent folder for that month, so the first October batches are not mailed again. `LIMIT` applies after that skip.
+
 Deploy: `./deploy/deploy-monthly-email-job.sh` (does not execute). Local sends still need `--apply` unless `NODE_ENV=production`.
+
+## Monthly promo-code and 2-for-1 sales
+
+Replaces the manual Mariana Tek **Promotion Redemption** export. The place to read it is the **Monthly sales** tab on [Copilot base](https://docs.google.com/spreadsheets/d/1m0WKULiG6unH9wicoNKWp3aI5b6MJcm74k745AlWzFI) — the same workbook as Review. The copilot monthly email stays free of dollar totals. **2-for-1 unassigned** on that sheet lists intro-offer orders that did not match a roster code.
+
+Completed, non-refunded orders. Pretax total is the order subtotal excluding tax.
+
+- **Promo codes** — discount name matches `copilot_db` on `discount_id`, or on `promo_code` when that voucher has at most three codes.
+- **2-for-1** — every Co-Pilot "2 for" product order. A copilot is credited when their offer link is the last touch within 7 days (not `link_in_bio`). Orders with no matching session still count in the month total.
+
+The job refreshes the UTM snapshot and `copilots.copilot_monthly_promo_sales`, prints the month, and rewrites both sheet tabs with every copilot-month. Default month is the previous complete Eastern calendar month.
+
+```bash
+npm run report-monthly-sales
+MONTH=2026-09 npm run report-monthly-sales
+MONTH=2026-09 REGION=NYC npm run report-monthly-sales
+```
 
 ## Env
 

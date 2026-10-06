@@ -31,6 +31,7 @@ import {
   markSheetApplied,
   patchReviewDecisionNotes,
   readyDecisionsFromReviewCells,
+  refreshPerformanceConnectedSheet,
   reviewRowDecision,
   shouldHoldUntilExpiry,
   withApplyFailedNote,
@@ -290,6 +291,14 @@ export async function evaluateCopilots() {
     await ensureCopilotDbColumns();
     await ensureReviewSheetLayout();
     await applySheetUnionViews();
+    console.log("\n🔄 copilot_performance Connected Sheet");
+    try {
+      await refreshPerformanceConnectedSheet();
+    } catch (error) {
+      console.warn(
+        `   ⚠️  Could not refresh copilot_performance tab: ${error.message}`,
+      );
+    }
   }
 
   const attempted = new Set();

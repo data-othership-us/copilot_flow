@@ -15,6 +15,11 @@
 import { config, sleep } from "../config.js";
 import { listMonthlyEmailCopilots } from "../lib/bq/copilotOps.js";
 import {
+  backfillMonthlyEmailSendsFromGmail,
+  listMonthlyEmailSends,
+  recordMonthlyEmailSend,
+} from "../lib/bq/monthlyEmailSends.js";
+import {
   isNycRegion,
   normalizeCopilotRegion,
   titleCaseTier,
@@ -238,6 +243,26 @@ export async function emailMonthlyUpdate({
   const allRows = await listMonthlyEmailCopilots();
   const matched = allRows.length;
   let rows = allRows;
+  const monthKey = window.startDate.slice(0, 7);
+  let alreadySent = new Set();
+  try {
+    const backfilled = await backfillMonthlyEmailSendsFromGmail(
+      window.monthLabel,
+      monthKey
+    );
+    alreadySent = await listMonthlyEmailSends(monthKey);
+    if (backfilled) {
+      console.log(
+        `   Recorded ${backfilled} earlier ${window.monthLabel} send(s) from Gmail`
+      );
+    }
+    console.log(
+      `   ${alreadySent.size} contact email(s) already sent for ${window.monthLabel}`
+    );
+  } catch (error) {
+    console.warn(`   ⚠️  Could not load the sent log: ${error.message}`);
+    if (!dryRun) throw error;
+  }
 
   if (regionOnly) {
     rows = rows.filter(
@@ -256,6 +281,14 @@ export async function emailMonthlyUpdate({
       );
     }
   }
+  const pendingBeforeLimit = rows.length;
+  rows = rows.filter((row) => !alreadySent.has(emailKey(row.contact_email)));
+  const alreadySentCount = pendingBeforeLimit - rows.length;
+  if (alreadySentCount) {
+    console.log(
+      `   Skipping ${alreadySentCount} already sent for ${window.monthLabel}`
+    );
+  }
   if (limit) rows = rows.slice(0, limit);
 
   const printBodies = rows.length <= 5;
@@ -263,6 +296,7 @@ export async function emailMonthlyUpdate({
     dryRun,
     matched,
     queued: rows.length,
+    alreadySent: alreadySentCount,
     sent: 0,
     skipped: 0,
     failed: 0,
@@ -327,6 +361,22 @@ export async function emailMonthlyUpdate({
         summary.skipped++;
         continue;
       }
+      if (result.sent) {
+        try {
+          await recordMonthlyEmailSend({
+            contactEmail: email,
+            monthKey,
+            messageId: result.messageId,
+            region: regionKey,
+            toEmail: result.to || email,
+          });
+          alreadySent.add(emailKey(email));
+        } catch (recordError) {
+          console.warn(
+            `   ⚠️  sent, but could not record it: ${recordError.message}`
+          );
+        }
+      }
       summary.sent++;
     } catch (error) {
       summary.failed++;
@@ -343,6 +393,7 @@ export async function emailMonthlyUpdate({
   console.log("=".repeat(60));
   console.log(`   Month:         ${window.monthLabel}`);
   console.log(`   Matched in BQ: ${summary.matched}`);
+  console.log(`   Already sent:  ${summary.alreadySent}`);
   console.log(`   Queued:        ${summary.queued}`);
   console.log(`   ${dryRun ? "Would send" : "Sent"}:      ${summary.sent}`);
   if (!dryRun) console.log(`   Skipped:       ${summary.skipped}`);
