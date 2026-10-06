@@ -111,6 +111,13 @@ npm run evaluate-copilots
 EVALUATE_SKIP_APPLY=1 npm run evaluate-copilots
 ```
 
+The Copilot base sheet has a **Co-Pilot** menu (loads when the sheet opens):
+
+- **Refresh Review** runs the same rebuild as `EVALUATE_SKIP_APPLY=1` (Review and Add to Modash). Filled decisions stay. The daily job still applies them.
+- **Refresh status** shows whether that Cloud Run run is still going. Reload Review after it finishes.
+
+The menu is the bound Apps Script in `apps-script/`. The Google account that clicks Refresh needs permission to run `copilot-evaluate-copilots` with overrides. Push script edits with `npm run sheet:push` after `npm run sheet:login`.
+
 Create a Google Sheet, share it with the job’s service account as Editor, set `EVALUATION_SHEET_ID`. The **Review** tab (and the decision dropdown) is created on first run. The same job rebuilds **Add to Modash** with paste-ready `status=add` rows (one per active-copilot IG handle that is not on `modash_creators` — copy the `ig_handle` column) and a separate `status=outlier` block for people waiting on a public handle (do not paste those). Applied history is a Sheets data connector, not written by the job. To change the 7-day window, edit `bq/copilot_evaluation_queue.sql` and re-run `sync-copilot-db`.
 
 Deploy: `./deploy/deploy-evaluate-copilots-job.sh` (9:30am ET).

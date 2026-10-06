@@ -28,7 +28,10 @@
     "apply-offboard-credits": "node src/scripts/applyOffboardCredits.js",
     "email-resubmit-handles": "node src/scripts/emailResubmitHandles.js",
     "email-monthly": "node src/scripts/emailMonthlyUpdate.js",
-    "report-monthly-sales": "node src/scripts/reportMonthlyPromoSales.js"
+    "report-monthly-sales": "node src/scripts/reportMonthlyPromoSales.js",
+    "sheet:login": "clasp login",
+    "sheet:push": "clasp push -f",
+    "sheet:open": "clasp open"
   },
   "engines": {
     "node": ">=20"
@@ -41,5 +44,8 @@
     "dayjs": "^1.11.13",
     "dotenv": "^16.4.5",
     "googleapis": "^171.4.0"
+  },
+  "devDependencies": {
+    "@google/clasp": "^3.4.1"
   }
 }
