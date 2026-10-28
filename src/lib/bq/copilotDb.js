@@ -187,12 +187,63 @@ function igUrlFromHandleSql(expr) {
   )`;
 }
 
-function missingFromActiveTabsWhere(alias = "T") {
+/** Live Co-Pilot term, same statuses as copilot_performance. */
+function liveMembershipExistsSql(alias = "T") {
+  return `EXISTS (
+    SELECT 1
+    FROM \`data-pipeline-492715.core.mt_membership_instances\` AS i
+    WHERE CAST(i.user_id AS STRING) = NULLIF(TRIM(CAST(${alias}.user_id AS STRING)), '')
+      AND REGEXP_CONTAINS(LOWER(IFNULL(i.membership_name, '')), r'co[\\s-]?pilot')
+      AND LOWER(IFNULL(i.status, '')) IN (
+        'active', 'pending', 'frozen', 'payment_failure'
+      )
+  )`;
+}
+
+/** Applied offboard / never again: leave status alone while the term runs out. */
+function offboardStatusLockSql(alias = "T") {
+  return `(
+    IFNULL(${alias}.never_again, FALSE)
+    OR (
+      LOWER(IFNULL(${alias}.decision, '')) IN ('offboard', 'never again', 'never_again')
+      AND ${alias}.decision_applied_at IS NOT NULL
+    )
+  )`;
+}
+
+/** MT pipeline lag after onboard / renew / upgrade / downgrade. */
+function recentMembershipGraceSql(alias = "T") {
+  return `(
+    (${alias}.onboarded_at IS NOT NULL
+      AND ${alias}.onboarded_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR))
+    OR (
+      ${alias}.decision_applied_at IS NOT NULL
+      AND ${alias}.decision_applied_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR)
+      AND LOWER(IFNULL(${alias}.decision, '')) IN (
+        'onboard', 'renew', 'upgrade', 'downgrade'
+      )
+    )
+  )`;
+}
+
+function activateFromMembershipWhere(alias = "T") {
+  return `
+    ${alias}.contact_email IS NOT NULL
+    AND TRIM(${alias}.contact_email) != ''
+    AND LOWER(IFNULL(${alias}.status, '')) != 'active'
+    AND NOT ${offboardStatusLockSql(alias)}
+    AND ${liveMembershipExistsSql(alias)}
+  `;
+}
+
+function inactivateWithoutMembershipWhere(alias = "T") {
   return `
     LOWER(IFNULL(${alias}.status, '')) != 'inactive'
     AND ${alias}.contact_email IS NOT NULL
     AND TRIM(${alias}.contact_email) != ''
     AND LOWER(${alias}.contact_email) NOT IN UNNEST(@active_emails)
+    AND NOT ${liveMembershipExistsSql(alias)}
+    AND NOT ${recentMembershipGraceSql(alias)}
   `;
 }
 
@@ -308,82 +359,130 @@ export async function previewSheetSync() {
   });
   const counts = rows[0] || { sheet_rows: 0, would_insert: 0, would_update: 0 };
   const activeEmails = await listActiveSheetEmails();
+  const [activateRows] = await bigquery.query({
+    query: `
+      SELECT COUNT(*) AS n
+      FROM ${copilotRef} T
+      WHERE ${activateFromMembershipWhere("T")}
+    `,
+    ...queryOptions(),
+  });
+  const would_activate = Number(activateRows[0]?.n ?? 0);
   let would_inactivate = 0;
   if (activeEmails.length) {
     const [inactiveRows] = await bigquery.query({
       query: `
         SELECT COUNT(*) AS n
         FROM ${copilotRef} T
-        WHERE ${missingFromActiveTabsWhere("T")}
+        WHERE ${inactivateWithoutMembershipWhere("T")}
       `,
       ...activeEmailsQueryOptions(activeEmails),
     });
     would_inactivate = Number(inactiveRows[0]?.n ?? 0);
   }
-  return { ...counts, would_inactivate };
+  return { ...counts, would_activate, would_inactivate };
+}
+
+const ROSTER_STATUS_LIST_SQL = `
+  contact_email,
+  first_name,
+  last_name,
+  region,
+  tier,
+  status
+`;
+
+function rosterListLimit(limit) {
+  return Number(limit) > 0 ? `LIMIT ${Number.parseInt(limit, 10)}` : "";
 }
 
 /**
- * Active copilot_db emails that are not on any active TO/NY sheet tab.
+ * Inactive (or blank) roster rows with a live Co-Pilot membership.
+ * Applied offboard / never again stay off this list.
  */
-export async function listMissingFromActiveTabs({ limit = 0 } = {}) {
+export async function listActivatingFromMembership({ limit = 0 } = {}) {
   const bigquery = getBigQueryClient();
-  const copilotRef = copilotDbRef();
-  const activeEmails = await listActiveSheetEmails();
-  if (!activeEmails.length) return [];
-  const limitSql =
-    Number(limit) > 0 ? `LIMIT ${Number.parseInt(limit, 10)}` : "";
   const [rows] = await bigquery.query({
     query: `
-      SELECT
-        contact_email,
-        first_name,
-        last_name,
-        region,
-        tier,
-        status
-      FROM ${copilotRef} T
-      WHERE ${missingFromActiveTabsWhere("T")}
+      SELECT ${ROSTER_STATUS_LIST_SQL}
+      FROM ${copilotDbRef()} T
+      WHERE ${activateFromMembershipWhere("T")}
       ORDER BY region, contact_email
-      ${limitSql}
+      ${rosterListLimit(limit)}
+    `,
+    ...queryOptions(),
+  });
+  return rows || [];
+}
+
+/**
+ * Roster rows that would be set inactive: not on an active tab, and no live
+ * Co-Pilot membership. Live memberships and the 48-hour pipeline grace stay.
+ */
+export async function listInactivatingWithoutMembership({ limit = 0 } = {}) {
+  const bigquery = getBigQueryClient();
+  const activeEmails = await listActiveSheetEmails();
+  if (!activeEmails.length) return [];
+  const [rows] = await bigquery.query({
+    query: `
+      SELECT ${ROSTER_STATUS_LIST_SQL}
+      FROM ${copilotDbRef()} T
+      WHERE ${inactivateWithoutMembershipWhere("T")}
+      ORDER BY region, contact_email
+      ${rosterListLimit(limit)}
     `,
     ...activeEmailsQueryOptions(activeEmails),
   });
   return rows || [];
 }
 
-/**
- * Mark roster status inactive when the email is gone from every active tab.
- * People still on an active tab stay active (even if they also appear on Inactive).
- * Does not touch rows already inactive. Blank/null status is treated as
- * not on the roster (same as active-but-removed).
- * Active-tab emails are loaded first so the UPDATE does not read Drive.
- */
-export async function inactivateMissingFromActiveTabs() {
+async function runCopilotStatusUpdate(status, whereSql, options) {
+  if (status !== "active" && status !== "inactive") {
+    throw new Error(`Refusing roster status update to ${status}`);
+  }
   const bigquery = getBigQueryClient();
-  const copilotRef = copilotDbRef();
+  const [job] = await bigquery.createQueryJob({
+    query: `
+      UPDATE ${copilotDbRef()} T
+      SET
+        status = '${status}',
+        updated_at = CURRENT_TIMESTAMP()
+      WHERE ${whereSql}
+    `,
+    ...options,
+  });
+  await job.getQueryResults();
+  const [metadata] = await job.getMetadata();
+  return Number(metadata?.statistics?.query?.numDmlAffectedRows ?? 0);
+}
+
+/**
+ * Roster status follows the Co-Pilot membership, then the ops sheet.
+ * Live membership (active / pending / frozen / payment_failure) → active,
+ * except an applied offboard or never again (those stay inactive until the
+ * term ends). Everyone else who is missing from every active tab → inactive.
+ * A 48-hour grace after onboard / renew / upgrade / downgrade covers MT
+ * pipeline lag. Active-tab emails are loaded first so the UPDATE does not
+ * read Drive.
+ */
+export async function reconcileRosterStatus() {
+  const activated = await runCopilotStatusUpdate(
+    "active",
+    activateFromMembershipWhere("T"),
+    queryOptions()
+  );
   const activeEmails = await listActiveSheetEmails();
   if (!activeEmails.length) {
     throw new Error(
       "No active-tab emails from the ops sheets — refusing to inactivate"
     );
   }
-  const query = `
-    UPDATE ${copilotRef} T
-    SET
-      status = 'inactive',
-      updated_at = CURRENT_TIMESTAMP()
-    WHERE ${missingFromActiveTabsWhere("T")}
-  `;
-  const [job] = await bigquery.createQueryJob({
-    query,
-    ...activeEmailsQueryOptions(activeEmails),
-  });
-  await job.getQueryResults();
-  const meta = job.metadata?.statistics?.query;
-  return {
-    affected: Number(meta?.numDmlAffectedRows ?? 0),
-  };
+  const inactivated = await runCopilotStatusUpdate(
+    "inactive",
+    inactivateWithoutMembershipWhere("T"),
+    activeEmailsQueryOptions(activeEmails)
+  );
+  return { activated, inactivated };
 }
 
 function activeIgFromSheetSql() {

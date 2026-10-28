@@ -97,7 +97,8 @@ async function notifyCopilot(row, kind, extra = {}) {
     ...emailFields(row, extra),
     cyclePoints: extra.cyclePoints ?? cycle?.cycle_points,
     socialRequirementMet:
-      extra.socialRequirementMet ?? cycle?.social_requirement_met,
+      extra.socialRequirementMet ??
+      cycle?.social_requirement_met_last_cycle_month,
   });
   if (!dryRun && !result.sent && result.channel !== "invalid_to") {
     throw new Error(

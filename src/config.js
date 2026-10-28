@@ -135,6 +135,20 @@ export const config = {
       "NOTION_EVENTS_DATABASE_ID",
       "dbb6515ea7334a38bd439e43aec85dee"
     ),
+    /** Co-Pilot hybrid request form. Share with the Notion integration. */
+    hybridRequestsDatabaseId: env(
+      "NOTION_HYBRID_REQUESTS_DATABASE_ID",
+      "1cb099af6e804c48af78b255f842beec"
+    ),
+    /** Shannon's monthly Co-Pilot reports. One page per month. */
+    toReportsDatabaseId: env(
+      "NOTION_TO_REPORTS_DATABASE_ID",
+      "3489da4603ff42f7b2452835dca32267"
+    ),
+    nycReportsDatabaseId: env(
+      "NOTION_NYC_REPORTS_DATABASE_ID",
+      "5146547db5dd4711926aed2361d73f06"
+    ),
     reonboard: {
       needsReview: env("NOTION_REONBOARD_NEEDS_REVIEW", "Needs review"),
       proceed: env("NOTION_REONBOARD_PROCEED", "Proceed"),
@@ -173,6 +187,40 @@ export const config = {
     rejectionCreditNote: env(
       "COPILOT_REJECTION_MT_CREDIT_NOTE",
       "Co-Pilot application thank-you credit"
+    ),
+    reducedClassTagId: env("MT_REDUCED_CLASS_TAG_ID", "4968"),
+    locationIds: {
+      Adelaide: env("MT_LOCATION_ID_ADELAIDE", "48717"),
+      Yorkville: env("MT_LOCATION_ID_YORKVILLE", "48750"),
+      Flatiron: env("MT_LOCATION_ID_FLATIRON", "48784"),
+      Williamsburg: env("MT_LOCATION_ID_WILLIAMSBURG", "48817"),
+    },
+    regionIds: {
+      Toronto: env("MT_REGION_ID_TORONTO", "48541"),
+      "New York": env("MT_REGION_ID_NEW_YORK", "48575"),
+    },
+  },
+
+  hybrid: {
+    notifyTo: env("HYBRID_NOTIFY_TO", "shannon@othership.us"),
+    notifyCc: env("HYBRID_NOTIFY_CC", "stella.b@othership.us"),
+    testEmail: env("HYBRID_TEST_EMAIL", "tina@othership.us"),
+    testCode: env("HYBRID_TEST_CODE", "123456"),
+    confirmDatabaseId: env(
+      "NOTION_HYBRID_CONFIRM_DATABASE_ID",
+      "f1d845c86c444ef7b8f376b41297800c"
+    ),
+    confirmFormUrl: env(
+      "HYBRID_CONFIRM_FORM_URL",
+      "https://www.notion.so/f1d845c86c444ef7b8f376b41297800c?v=3f9271660d728151841d000c5e855dc0"
+    ),
+    shannonNotionUserId: env(
+      "HYBRID_SHANNON_NOTION_USER_ID",
+      "4911c721-5373-490d-bfcc-3eabdbc40448"
+    ),
+    stellaNotionUserId: env(
+      "HYBRID_STELLA_NOTION_USER_ID",
+      "322d872b-594c-8193-a1cb-0002ff25c6e7"
     ),
   },
 

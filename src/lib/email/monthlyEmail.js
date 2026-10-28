@@ -246,7 +246,6 @@ export function previewMonthlyEmail(input) {
  *   promoCode?: string,
  *   offerLink?: string,
  *   cyclePoints?: number,
- *   socialRequirementMet?: boolean,
  *   socialRequirementMetLastMonth?: boolean|null,
  *   socialRequirementMonthsMet?: string,
  *   membershipEnd?: string,

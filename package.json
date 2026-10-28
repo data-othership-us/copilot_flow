@@ -29,6 +29,7 @@
     "email-resubmit-handles": "node src/scripts/emailResubmitHandles.js",
     "email-monthly": "node src/scripts/emailMonthlyUpdate.js",
     "report-monthly-sales": "node src/scripts/reportMonthlyPromoSales.js",
+    "process-hybrid-requests": "node src/scripts/processHybridRequests.js",
     "sheet:login": "clasp login",
     "sheet:push": "clasp push -f",
     "sheet:open": "clasp open"

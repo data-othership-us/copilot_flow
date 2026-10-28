@@ -22,6 +22,11 @@ const MANAGEMENT_EMAIL_KINDS = new Set([
   "copilot_payment_nudge",
   "copilot_resubmit_handles",
   "copilot_monthly",
+  "copilot_hybrid_request",
+  "copilot_hybrid_confirmed",
+  "copilot_hybrid_declined",
+  "copilot_hybrid_availability",
+  "copilot_hybrid_booked",
 ]);
 
 export function getEmailSendMethod() {

@@ -4,24 +4,38 @@
  *   npm run report-monthly-sales
  *   MONTH=2026-09 npm run report-monthly-sales
  *   MONTH=2026-09 REGION=NYC npm run report-monthly-sales
+ *   DRY_RUN=0 npm run report-monthly-sales -- --apply
  *
  * Default month is the previous complete Eastern calendar month.
- * Prints pretax order totals (excluding tax) for roster promo codes and
- * Co-Pilot 2-for-1 offers, then refreshes the Monthly sales tab on Copilot base.
+ * Prints pretax order totals, then writes Code Revenue and the code table
+ * onto the Toronto and New York Co-Pilot Reports pages in Notion.
+ * Dry-run unless DRY_RUN is off and (--apply or NODE_ENV=production).
  */
+import { config } from "../config.js";
 import { refreshCopilotUtmSessions } from "../lib/bq/copilotDb.js";
 import {
   applyMonthlyPromoSalesView,
+  listMonthlyProgramStats,
   listMonthlyPromoSales,
-  listPromoSalesHistory,
   listUnassignedIntroOffers,
   listUnmatchedCopilotDiscounts,
 } from "../lib/bq/monthlyPromoSales.js";
 import { normalizeCopilotRegion } from "../lib/copilotIdentity.js";
-import {
-  salesSheetUrl,
-  writeMonthlySalesSheet,
-} from "../lib/sheets/monthlySalesSheet.js";
+import { publishMonthlyCodeReports } from "../lib/notion/monthlyCodeSales.js";
+
+function hasApplyFlag(argv = process.argv) {
+  return argv.includes("--apply");
+}
+
+/** Same gate as the monthly email: local runs stay dry unless --apply. */
+export function isReportDryRun({
+  dryRun = config.dryRun,
+  argv = process.argv,
+} = {}) {
+  if (dryRun) return true;
+  if (hasApplyFlag(argv)) return false;
+  return process.env.NODE_ENV !== "production";
+}
 
 function easternYmd(date = new Date()) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -213,14 +227,13 @@ export async function reportMonthlyPromoSales({
   if (regionKey) {
     rows = rows.filter((row) => normalizeCopilotRegion(row.region) === regionKey);
   }
-  const unassigned = regionKey
-    ? []
-    : await listUnassignedIntroOffers(report.monthStart);
+  const unassigned = await listUnassignedIntroOffers(report.monthStart);
+  const printedUnassigned = regionKey ? [] : unassigned;
   const unmatched = regionKey ? [] : await listUnmatchedCopilotDiscounts(report.monthStart);
 
   const promoOrders = sumField(rows, "promo_orders");
   const offerOnRoster = sumField(rows, "offer_orders");
-  const offerUnassigned = unassigned.reduce(
+  const offerUnassigned = printedUnassigned.reduce(
     (total, row) => total + bqNumber(row.orders),
     0
   );
@@ -228,10 +241,10 @@ export async function reportMonthlyPromoSales({
   const promoCad = sumField(rows, "promo_cad");
   const offerUsd =
     sumField(rows, "offer_usd") +
-    unassigned.reduce((total, row) => total + bqNumber(row.usd), 0);
+    printedUnassigned.reduce((total, row) => total + bqNumber(row.usd), 0);
   const offerCad =
     sumField(rows, "offer_cad") +
-    unassigned.reduce((total, row) => total + bqNumber(row.cad), 0);
+    printedUnassigned.reduce((total, row) => total + bqNumber(row.cad), 0);
 
   console.log("");
   console.log(
@@ -264,11 +277,11 @@ export async function reportMonthlyPromoSales({
     console.log("");
     console.log("Copilot-like discounts not on the roster");
     printUnmatched(unmatched);
-    if (unassigned.length) {
+    if (printedUnassigned.length) {
       console.log("");
       console.log("2-for-1 orders not tied to a copilot");
       printUnmatched(
-        unassigned.map((row) => ({
+        printedUnassigned.map((row) => ({
           promo_code: row.promo_code || "(no code)",
           orders: row.orders,
           usd: row.usd,
@@ -279,17 +292,31 @@ export async function reportMonthlyPromoSales({
     }
   }
 
+  const programStats = await listMonthlyProgramStats(report.monthStart);
+  const statsByRegion = {};
+  for (const row of programStats) {
+    const key = normalizeCopilotRegion(row.region);
+    if (!key) continue;
+    statsByRegion[key] = {
+      pilots: bqNumber(row.pilots),
+      onboarded: bqNumber(row.onboarded),
+      offboarded: bqNumber(row.offboarded),
+      sessions: bqNumber(row.sessions),
+    };
+  }
+
+  const dryRun = isReportDryRun();
   console.log("");
-  console.log("Writing Copilot base…");
-  const history = await listPromoSalesHistory();
-  const unassignedHistory = await listUnassignedIntroOffers();
-  const written = await writeMonthlySalesSheet({
-    sales: history,
-    unassigned: unassignedHistory,
+  console.log(dryRun ? "Notion (dry run)" : "Notion");
+  const pages = await publishMonthlyCodeReports({
+    monthLabel: report.monthLabel,
+    rows,
+    unassigned,
+    statsByRegion,
+    regionKey,
+    monthExplicit: Boolean(String(monthKey || "").trim()),
+    dryRun,
   });
-  console.log(
-    `Monthly sales tab: ${written.salesRows} copilot-months · ${salesSheetUrl()}`
-  );
 
   return {
     month: report.monthKey,
@@ -298,6 +325,7 @@ export async function reportMonthlyPromoSales({
     usd: promoUsd + offerUsd,
     cad: promoCad + offerCad,
     unmatched: unmatched.length,
-    sheetUrl: salesSheetUrl(),
+    pages,
+    dryRun,
   };
 }

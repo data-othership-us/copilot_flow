@@ -322,8 +322,7 @@ export async function listEvaluationQueue() {
         modash_impressions,
         modash_stories_current_membership,
         modash_feed_posts_current_membership,
-        social_requirement_met,
-        social_requirement_met_last_month,
+        social_requirement_met_last_cycle_month,
         social_requirement_months_met,
         membership_name,
         membership_start,
@@ -438,6 +437,41 @@ export async function getCopilotByEmail(email) {
       LIMIT 1
     `,
     ...queryOptions({ email: key }),
+  });
+  return normalizeCopilotRow(rows?.[0]) || null;
+}
+
+/** Contact email first. Mariana Tek email only when no contact row matches. */
+export async function getCopilotByAnyEmail(email) {
+  const byContact = await getCopilotByEmail(email);
+  if (byContact) return byContact;
+  const key = emailKey(email);
+  if (!key) return null;
+  const bigquery = getBigQueryClient();
+  const [rows] = await bigquery.query({
+    query: `
+      SELECT *
+      FROM ${copilotDbRef()}
+      WHERE LOWER(mt_email) = @email
+      LIMIT 1
+    `,
+    ...queryOptions({ email: key }),
+  });
+  return normalizeCopilotRow(rows?.[0]) || null;
+}
+
+export async function getCopilotByPromoCode(code) {
+  const key = String(code || "").trim().toUpperCase();
+  if (!key) return null;
+  const bigquery = getBigQueryClient();
+  const [rows] = await bigquery.query({
+    query: `
+      SELECT *
+      FROM ${copilotDbRef()}
+      WHERE UPPER(TRIM(promo_code)) = @code
+      LIMIT 1
+    `,
+    ...queryOptions({ code: key }),
   });
   return normalizeCopilotRow(rows?.[0]) || null;
 }
@@ -579,8 +613,7 @@ export async function listMonthlyEmailCopilots() {
         offer_link,
         cycle_points,
         last_month_points,
-        social_requirement_met,
-        social_requirement_met_last_month,
+        social_requirement_met_last_cycle_month,
         social_requirement_months_met,
         modash_stories_current_membership,
         modash_feed_posts_current_membership,
@@ -621,7 +654,7 @@ export async function getCopilotCycleStats(email) {
     query: `
       SELECT
         cycle_points,
-        social_requirement_met
+        social_requirement_met_last_cycle_month
       FROM \`${projectId}.${dataset}.copilot_performance\`
       WHERE LOWER(contact_email) = @email
       LIMIT 1

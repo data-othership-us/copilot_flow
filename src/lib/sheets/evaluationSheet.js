@@ -27,8 +27,7 @@ const REVIEW_HEADERS = [
   "modash_impressions",
   "modash_stories_current_membership",
   "modash_feed_posts_current_membership",
-  "social_requirement_met",
-  "social_requirement_met_last_month",
+  "social_requirement_met_last_cycle_month",
   "social_requirement_months_met",
   "redemption_count_current_membership",
   "redemption_usd_current_membership",
@@ -452,7 +451,7 @@ async function waitForDataSourceRefresh(
 
 /**
  * Reconnect the BigQuery Connected Sheet preview so new view columns
- * (last-month social, months met) show up next to the existing schema.
+ * (last cycle month, months met) show up next to the existing schema.
  */
 export async function refreshPerformanceConnectedSheet() {
   const sheets = getSheetsClient();
@@ -1005,8 +1004,7 @@ export function rowFromQueue(r) {
     fmtNum(r.modash_impressions),
     fmtNum(r.modash_stories_current_membership),
     fmtNum(r.modash_feed_posts_current_membership),
-    fmtBool(r.social_requirement_met),
-    fmtBool(r.social_requirement_met_last_month),
+    fmtBool(r.social_requirement_met_last_cycle_month),
     r.social_requirement_months_met || "",
     fmtNum(r.redemption_count_current_membership),
     fmtNum(r.redemption_usd_current_membership),

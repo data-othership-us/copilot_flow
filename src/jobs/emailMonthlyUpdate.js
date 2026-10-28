@@ -128,10 +128,6 @@ function bqTriBool(value) {
   return null;
 }
 
-function bqBool(value) {
-  return bqTriBool(value) === true;
-}
-
 function bqString(value) {
   if (value == null || value === "") return "";
   if (typeof value === "object" && value.value != null) return bqString(value.value);
@@ -315,14 +311,14 @@ export async function emailMonthlyUpdate({
     const socialRequirementMonthsMet = bqString(
       row.social_requirement_months_met
     );
-    const socialRequirementMetLastMonth = bqTriBool(
-      row.social_requirement_met_last_month
+    const socialRequirementMetLastCycleMonth = bqTriBool(
+      row.social_requirement_met_last_cycle_month
     );
     console.log(
       `   ${regionKey}/${titleCaseTier(row.tier)}  pts=${bqNumber(row.cycle_points)}` +
         `  social=${formatSocialRequirementLine({
           monthsMet: socialRequirementMonthsMet,
-          lastMonthMet: socialRequirementMetLastMonth,
+          lastMonthMet: socialRequirementMetLastCycleMonth,
         })}` +
         `  membership=${row.membership_status || "—"}` +
         (bqDate(row.membership_end) ? ` end=${bqDate(row.membership_end)}` : "")
@@ -339,8 +335,7 @@ export async function emailMonthlyUpdate({
         promoCode: row.promo_code,
         offerLink: row.offer_link,
         cyclePoints: bqNumber(row.cycle_points),
-        socialRequirementMet: bqBool(row.social_requirement_met),
-        socialRequirementMetLastMonth,
+        socialRequirementMetLastMonth: socialRequirementMetLastCycleMonth,
         socialRequirementMonthsMet,
         membershipEnd: bqDate(row.membership_end),
         daysToExpiry: bqNumber(row.days_to_expiry),

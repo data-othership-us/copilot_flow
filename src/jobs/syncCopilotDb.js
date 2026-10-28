@@ -2,18 +2,21 @@ import { config } from "../config.js";
 import {
   applySheetUnionViews,
   ensureCopilotDbColumns,
-  inactivateMissingFromActiveTabs,
-  listMissingFromActiveTabs,
+  listActivatingFromMembership,
+  listInactivatingWithoutMembership,
   mergeSheetIntoCopilotDb,
   previewSheetSync,
+  reconcileRosterStatus,
 } from "../lib/bq/copilotDb.js";
 import { fillMissingMtAccounts } from "../lib/mt/fillMissingMtAccounts.js";
 
 /**
  * Daily Cloud Run job (8:45am ET) or on-demand: Google Sheet external tables → copilot_db.
  * Sheet-owned columns only; MT/discount/system fields are never overwritten.
- * After MERGE, marks copilot_db emails missing from every active tab as
- * inactive, then fills missing user_id / mt_email from Mariana Tek.
+ * After MERGE, fills missing user_id / mt_email from Mariana Tek, then sets
+ * roster status from the Co-Pilot membership: live term → active (applied
+ * offboard / never again stay inactive), otherwise not on an active tab →
+ * inactive.
  */
 export async function syncCopilotDb({ applyViews = true } = {}) {
   console.log("🚀 sync-copilot-db");
@@ -42,7 +45,7 @@ export async function syncCopilotDb({ applyViews = true } = {}) {
   try {
     preview = await previewSheetSync();
     console.log(
-      `   Sheet rows: ${preview.sheet_rows} | would insert: ${preview.would_insert} | would update: ${preview.would_update} | would inactivate (not on an active tab): ${Number(preview.would_inactivate ?? 0)}`
+      `   Sheet rows: ${preview.sheet_rows} | would insert: ${preview.would_insert} | would update: ${preview.would_update} | would activate (live membership): ${Number(preview.would_activate ?? 0)} | would inactivate (no live membership, not on an active tab): ${Number(preview.would_inactivate ?? 0)}`
     );
   } catch (error) {
     console.error(
@@ -55,21 +58,21 @@ export async function syncCopilotDb({ applyViews = true } = {}) {
     throw error;
   }
 
+  const wouldActivate = Number(preview.would_activate ?? 0);
   const wouldInactivate = Number(preview.would_inactivate ?? 0);
 
   if (config.dryRun) {
-    console.log("\n   (DRY_RUN: skipping MERGE + inactivate)");
-    if (wouldInactivate > 0) {
-      const sample = await listMissingFromActiveTabs({ limit: 15 });
-      for (const r of sample) {
-        console.log(
-          `   · ${r.contact_email}  ${r.region || "?"}/${r.tier || "?"}`
-        );
-      }
-      if (wouldInactivate > sample.length) {
-        console.log(`   · … +${wouldInactivate - sample.length} more`);
-      }
-    }
+    console.log("\n   (DRY_RUN: skipping MERGE + roster status)");
+    await logRosterSample(
+      "activate",
+      wouldActivate,
+      listActivatingFromMembership
+    );
+    await logRosterSample(
+      "inactivate",
+      wouldInactivate,
+      listInactivatingWithoutMembership
+    );
     const mtAccounts = await fillMissingMtAccounts({ dryRun: true });
     return { dryRun: true, preview, mtAccounts };
   }
@@ -78,12 +81,29 @@ export async function syncCopilotDb({ applyViews = true } = {}) {
   const result = await mergeSheetIntoCopilotDb();
   console.log(`   ✅ MERGE done (affected rows: ${result.affected})`);
 
-  console.log("\n—— Inactivate emails not on an active tab ——");
-  const inactivated = await inactivateMissingFromActiveTabs();
+  const mtAccounts = await fillMissingMtAccounts({ dryRun: false });
+
+  console.log("\n—— Roster status from membership ——");
+  const roster = await reconcileRosterStatus();
   console.log(
-    `   ✅ status=inactive for ${inactivated.affected} copilot_db row(s) missing from every active tab`
+    `   ✅ status=active for ${roster.activated} copilot_db row(s) with a live Co-Pilot membership`
+  );
+  console.log(
+    `   ✅ status=inactive for ${roster.inactivated} copilot_db row(s) with no live membership and not on an active tab`
   );
 
-  const mtAccounts = await fillMissingMtAccounts({ dryRun: false });
-  return { dryRun: false, preview, result, inactivated, mtAccounts };
+  return { dryRun: false, preview, result, roster, mtAccounts };
+}
+
+async function logRosterSample(label, total, listFn) {
+  if (total <= 0) return;
+  const sample = await listFn({ limit: 15 });
+  for (const r of sample) {
+    console.log(
+      `   · ${label} ${r.contact_email}  ${r.region || "?"}/${r.tier || "?"}`
+    );
+  }
+  if (total > sample.length) {
+    console.log(`   · … +${total - sample.length} more`);
+  }
 }

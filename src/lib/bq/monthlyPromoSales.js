@@ -182,3 +182,134 @@ export async function listUnmatchedCopilotDiscounts(monthStart) {
   });
   return rows;
 }
+
+function monthEndDate(monthStart) {
+  const [year, month] = String(monthStart).slice(0, 7).split("-").map(Number);
+  return new Date(Date.UTC(year, month, 0, 12)).toISOString().slice(0, 10);
+}
+
+/**
+ * Headcount for one Eastern month, from Co-Pilot memberships.
+ * Pilots were live on the last day. Onboarded is a first Co-Pilot term
+ * starting in the month. Offboarded is a last term ending in the month
+ * with no membership still open. Sessions are check-ins during a live term.
+ */
+export async function listMonthlyProgramStats(monthStart) {
+  const bigquery = getBigQueryClient();
+  const { projectId, dataset } = getBqConfig();
+  const [rows] = await bigquery.query({
+    query: `
+      WITH mem AS (
+        SELECT
+          CAST(user_id AS STRING) AS user_id,
+          DATE(started_at, 'America/New_York') AS start_date,
+          COALESCE(
+            DATE(cancelled_at, 'America/New_York'),
+            DATE(calculated_end_at, 'America/New_York'),
+            DATE(scheduled_end_at, 'America/New_York'),
+            end_date
+          ) AS end_date,
+          started_at,
+          COALESCE(
+            cancelled_at,
+            calculated_end_at,
+            scheduled_end_at,
+            TIMESTAMP(end_date)
+          ) AS ended_at,
+          CASE
+            WHEN REGEXP_CONTAINS(LOWER(membership_name), r'\\b(ny|nyc|new york)\\b') THEN 'NYC'
+            WHEN REGEXP_CONTAINS(LOWER(membership_name), r'\\b(to|toronto)\\b') THEN 'TO'
+            WHEN CAST(purchase_location_id AS STRING) IN ('48784', '48817') THEN 'NYC'
+            WHEN CAST(purchase_location_id AS STRING) IN ('48717', '48750') THEN 'TO'
+          END AS membership_region
+        FROM \`data-pipeline-492715.core.mt_membership_instances\`
+        WHERE REGEXP_CONTAINS(LOWER(IFNULL(membership_name, '')), r'co[\\s-]?pilot')
+      ),
+      roster AS (
+        SELECT DISTINCT
+          CAST(user_id AS STRING) AS user_id,
+          CASE
+            WHEN UPPER(TRIM(region)) IN ('NYC', 'NY', 'NEW YORK') THEN 'NYC'
+            WHEN UPPER(TRIM(region)) IN ('TO', 'TORONTO') THEN 'TO'
+          END AS region
+        FROM \`${projectId}.${dataset}.copilot_db\`
+        WHERE user_id IS NOT NULL AND TRIM(CAST(user_id AS STRING)) != ''
+      ),
+      scoped AS (
+        SELECT
+          m.user_id,
+          COALESCE(m.membership_region, r.region) AS region,
+          m.start_date,
+          m.end_date,
+          m.started_at,
+          m.ended_at
+        FROM mem AS m
+        LEFT JOIN roster AS r ON r.user_id = m.user_id
+        WHERE COALESCE(m.membership_region, r.region) IS NOT NULL
+      ),
+      person AS (
+        SELECT
+          region,
+          user_id,
+          MIN(start_date) AS first_start,
+          MAX(end_date) AS last_end,
+          MAX(IF(end_date IS NULL, 1, 0)) AS still_open
+        FROM scoped
+        GROUP BY region, user_id
+      ),
+      headcount AS (
+        SELECT
+          region,
+          COUNT(DISTINCT IF(
+            start_date <= DATE(@end)
+            AND (end_date IS NULL OR end_date >= DATE(@end)),
+            user_id,
+            NULL
+          )) AS pilots
+        FROM scoped
+        GROUP BY region
+      ),
+      movement AS (
+        SELECT
+          region,
+          COUNTIF(first_start BETWEEN DATE(@start) AND DATE(@end)) AS onboarded,
+          COUNTIF(
+            still_open = 0 AND last_end BETWEEN DATE(@start) AND DATE(@end)
+          ) AS offboarded
+        FROM person
+        GROUP BY region
+      ),
+      sessions AS (
+        SELECT
+          s.region,
+          COUNT(DISTINCT CONCAT(
+            CAST(res.user_id AS STRING), '|', CAST(res.session_id AS STRING)
+          )) AS sessions
+        FROM \`data-pipeline-492715.core.mt_reservations\` AS res
+        JOIN scoped AS s
+          ON s.user_id = CAST(res.user_id AS STRING)
+          AND res.session_start_at >= s.started_at
+          AND (s.ended_at IS NULL OR res.session_start_at <= s.ended_at)
+        WHERE LOWER(IFNULL(res.status, '')) = 'check in'
+          AND IFNULL(res.session_is_cancelled, FALSE) = FALSE
+          AND IFNULL(res.is_guest, FALSE) = FALSE
+          AND IFNULL(res.classpass_booking, FALSE) = FALSE
+          AND IFNULL(res.wellhub_booking, FALSE) = FALSE
+          AND DATE(res.session_start_at, 'America/New_York')
+            BETWEEN DATE(@start) AND DATE(@end)
+        GROUP BY s.region
+      )
+      SELECT
+        h.region,
+        h.pilots,
+        IFNULL(m.onboarded, 0) AS onboarded,
+        IFNULL(m.offboarded, 0) AS offboarded,
+        IFNULL(se.sessions, 0) AS sessions
+      FROM headcount AS h
+      LEFT JOIN movement AS m USING (region)
+      LEFT JOIN sessions AS se USING (region)
+    `,
+    ...queryOptions({ start: monthStart, end: monthEndDate(monthStart) }),
+  });
+  return rows;
+}

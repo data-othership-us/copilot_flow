@@ -113,7 +113,7 @@ EVALUATE_SKIP_APPLY=1 npm run evaluate-copilots
 
 The Copilot base sheet has a **Co-Pilot** menu (loads when the sheet opens):
 
-- **Refresh Review** runs the same rebuild as `EVALUATE_SKIP_APPLY=1` (Review and Add to Modash). Filled decisions stay. The daily job still applies them.
+- **Refresh Review** runs the same job as the 9:30am schedule: rebuild Review and Add to Modash, then apply decisions that are due (Mariana Tek and emails). Renew, upgrade, downgrade, offboard, and never again still wait until the last day. `EVALUATE_SKIP_APPLY=1` is the local rebuild that leaves filled decisions untouched.
 - **Refresh status** shows whether that Cloud Run run is still going. Reload Review after it finishes.
 
 The menu is the bound Apps Script in `apps-script/`. The Google account that clicks Refresh needs permission to run `copilot-evaluate-copilots` with overrides. Push script edits with `npm run sheet:push` after `npm run sheet:login`.
@@ -147,7 +147,7 @@ npm run backfill-applicants             # write to BigQuery
 
 ## Copilot DB sync (sheet → BigQuery)
 
-Ops tracking still lives in the TO/NY Google Sheets. External tables `raw_to_*` / `raw_nyc_*` feed `raw_copilots_union` → `raw_copilots_dedup`. The sync job MERGEs into `copilot_db` by email. After MERGE, any `copilot_db` row that is not already `inactive` and whose email is **not on any active tab** is set to `inactive` (removed from the roster, or never added to an active tab). People still on an active tab stay active even if they also appear on Inactive.
+Ops tracking still lives in the TO/NY Google Sheets. External tables `raw_to_*` / `raw_nyc_*` feed `raw_copilots_union` → `raw_copilots_dedup`. The sync job MERGEs into `copilot_db` by email, fills missing Mariana Tek accounts, then sets **roster `status` from the Co-Pilot membership**. A live term (`active`, `pending`, `frozen`, or `payment_failure`) sets `status=active`, including people who were never added to an active tab. An applied **offboard** or **never again** stays `inactive` while that term runs out. Anyone else who is **not on any active tab** and has no live Co-Pilot membership is set to `inactive`. People on an active tab with no membership yet stay active (Review / pending onboard). A 48-hour grace after onboard / renew / upgrade / downgrade covers MT pipeline lag. People still on an active tab stay active even if they also appear on Inactive.
 
 ```bash
 DRY_RUN=1 npm run sync-copilot-db
@@ -161,7 +161,7 @@ Deploy: `./deploy/deploy-sync-copilot-db-job.sh` (**8:45am ET**, before evaluate
 
 | Owner          | Columns                                                                                                                                                                                                                | Who writes                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Ops sheet**  | names, region, tier, **`status`**, bb_link, **`ig_handle`** (`@handle` or `@a, @b`), **sales fields**, **`sheet_membership_expiry`**, ops tracking (`renewal_amt`, `modash`, `in_hub`, …), notes                       | `sync-copilot-db` — does not overwrite `status` after an applied **offboard** / **never again**, or `tier` after an applied **upgrade** / **downgrade**. After MERGE, sets **`status=inactive`** for emails not on any active tab. Does not overwrite **`ig_followers`** (Modash is live; DB value is onboard seed only). Canonicalizes `ig_handle` (splits several accounts in one sheet cell); rebuilds **`ig_url`** as one profile link per handle. |
+| **Ops sheet**  | names, region, tier, **`status`** (starting point), bb_link, **`ig_handle`** (`@handle` or `@a, @b`), **sales fields**, **`sheet_membership_expiry`**, ops tracking (`renewal_amt`, `modash`, `in_hub`, …), notes                       | `sync-copilot-db` — does not overwrite `status` after an applied **offboard** / **never again**, or `tier` after an applied **upgrade** / **downgrade**. After MERGE, **roster status follows the live Co-Pilot membership** (live → `active`; not on an active tab and no live membership → `inactive`). Does not overwrite **`ig_followers`** (Modash is live; DB value is onboard seed only). Canonicalizes `ig_handle` (splits several accounts in one sheet cell); rebuilds **`ig_url`** as one profile link per handle. |
 | **System**     | `user_id`, `mt_email`, `mt_profile_link`, `discount_id`, **`promo_code`**, **`offer_link`**, `promoted_at`, `onboarded_at`, `acceptance_emailed_at`, **`tiktok_handle`**, **`tiktok_followers`**, **`other_channels`** | MT / promote / enrich jobs — **never overwritten by ops sheet sync**. Empty `ig_url` is kept when the sheet has no handle. The performance view overlays the current MT code string by `discount_id` from `stg_mt.stg_mt_discounts`, and rebuilds `offer_link` as `https://othership.us/copilot/intro-offer?id={that code}`.                                                                                                                                                                                                                                                |
 | **Evaluation** | `decision`, `decision_notes`, `decision_at`, `decision_source`, `decision_applied_at`, **`payment_nudge_at`**, **`freeze_until`**, **`never_again`**, **`new_hybrid_sales`**                                           | Evaluation Sheet → DB — **never ops sheet sync**                                                                                                                                                                                                                                                                                                                                                                                                       |
 | **Computed**   | membership (instances join), **`home_studio`** (MT user home location), classes / last class, promo redemptions, **`modash_posts`**, **`ig_followers`** (Modash, else copilot_db seed)                                 | View `copilot_performance`. Slack bot writes `modash_creators` + `modash_content`.                                                                                                                                                                                                                                                                                                                                                                     |
@@ -174,7 +174,7 @@ Dedup: one row per email; prefer **`active` over `inactive`**, then `ORDER BY ti
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
 | `npm run onboard-copilots`     | Promote handoff → discount, offer_link, membership, acceptance email, Onboarded                                    |
 | `npm run evaluate-copilots`    | Queue view → Review sheet → apply onboard / renew / offboard / never again / upgrade / downgrade / snooze / freeze / update / social |
-| `npm run sync-copilot-db`      | Migrate columns, refresh views, MERGE sheet → `copilot_db`, inactivate emails not on an active tab                 |
+| `npm run sync-copilot-db`      | Migrate columns, refresh views, MERGE sheet → `copilot_db`, set roster status from the live Co-Pilot membership   |
 | `npm run find-discount-ids`    | Lookup existing discount ids from `stg_mt.stg_mt_discounts` + set `offer_link` (no create)                          |
 | `npm run create-discounts`     | **Onboarding only** — create MT discounts for rows with `promo_code` but no `discount_id`                          |
 | `npm run update-discounts`     | Sync existing discounts in MT from BQ                                                                              |
@@ -187,7 +187,7 @@ Dedup: one row per email; prefer **`active` over `inactive`**, then `ORDER BY ti
 | `npm run find-reservations`    | Report future reservations for terminating memberships                                                             |
 | `npm run email-resubmit-handles` | One-time: email active copilots with a live Co-Pilot membership whose IG is **re-submit**                        |
 | `npm run email-monthly`            | Monthly update: cycle stats, Notion promo, Social Playgrounds + public events (per region)                      |
-| `npm run report-monthly-sales`     | Monthly promo-code and 2-for-1 sales, printed and written to the Copilot base **Monthly sales** tab            |
+| `npm run report-monthly-sales`     | Monthly promo-code and 2-for-1 sales, printed and written to the Toronto and New York Co-Pilot Reports in Notion |
 
 ### Resubmit social handles (one-time)
 
@@ -206,7 +206,7 @@ Scheduled email to every **active** copilot with a **live Co-Pilot membership** 
 
 - **Promo** — Ready rows for that month in the [Co-Pilot Monthly Promos](https://app.notion.com/p/9d4abbed5e94442d95a2699ead116776) Notion database (`All` / `NYC` / `TO`). Check **Ready** when the copy is good to send.
 - **Events** — same Global Events Calendar cut as `event-automations` monthly lists: Social Playgrounds (Co-Pilot only, linked from the calendar **Public Link** field — never the Notion page) plus public specials. NYC copilots get Flatiron / Williamsburg; TO copilots get Adelaide / Yorkville. Dates already in the past are skipped.
-- **Social** — each membership month so far (from the term start, not the calendar): Met, Not met, or In progress. The bar is 4 stories or 1 grid post (reel, carousel, post, or video) in that interval
+- **Social** — each membership month so far (from the term start, not the calendar): Met, Not met, or In progress. The bar is 4 stories or 1 grid post (IG reel/carousel/post, or TikTok video) in that interval
 - **Reminder** — social ask for each month of the term (4 stories or 1 feed post)
 - **The board** — top 3 in that copilot's region (NYC or TO) by last month's points. First name + last initial only; no totals or personal rank.
 
@@ -225,20 +225,23 @@ Deploy: `./deploy/deploy-monthly-email-job.sh` (does not execute). Local sends s
 
 ## Monthly promo-code and 2-for-1 sales
 
-Replaces the manual Mariana Tek **Promotion Redemption** export. The place to read it is the **Monthly sales** tab on [Copilot base](https://docs.google.com/spreadsheets/d/1m0WKULiG6unH9wicoNKWp3aI5b6MJcm74k745AlWzFI) — the same workbook as Review. The copilot monthly email stays free of dollar totals. **2-for-1 unassigned** on that sheet lists intro-offer orders that did not match a roster code.
+Replaces the manual Mariana Tek **Promotion Redemption** export. Shannon reads it on the existing monthly report pages: [Toronto Co-Pilot Reports](https://app.notion.com/p/othership/3489da4603ff42f7b2452835dca32267) and [New York Co-Pilot Reports](https://app.notion.com/p/othership/5146547db5dd4711926aed2361d73f06). One page per month. **Code Revenue** is pretax sales for copilots in that region (CAD in Toronto, USD in New York). The page body adds a **Code usage** section under whatever is already there (including a redemption screenshot). The copilot monthly email stays free of dollar totals.
 
 Completed, non-refunded orders. Pretax total is the order subtotal excluding tax.
 
 - **Promo codes** — discount name matches `copilot_db` on `discount_id`, or on `promo_code` when that voucher has at most three codes.
-- **2-for-1** — every Co-Pilot "2 for" product order. A copilot is credited when their offer link is the last touch within 7 days (not `link_in_bio`). Orders with no matching session still count in the month total.
+- **2-for-1** — Co-Pilot "2 for" product orders tied to a copilot when their offer link is the last touch within 7 days (not `link_in_bio`). Those sales are in Code Revenue. Orders with no matching session are listed under the table and left out of the number.
 
-The job refreshes the UTM snapshot and `copilots.copilot_monthly_promo_sales`, prints the month, and rewrites both sheet tabs with every copilot-month. Default month is the previous complete Eastern calendar month.
+The job refreshes the UTM snapshot and `copilots.copilot_monthly_promo_sales`, prints the month, and upserts that month's page in each database. A new page is **In progress**. A page already **Done** is left alone unless `MONTH` names it. It also fills **Total Pilots** (Co-Pilot membership live on the last day of the month), **Total Onboarded** (first Co-Pilot term starting that month), **Total Off Boarded** (last term ending that month, with none still open), and **Sessions Redeemed** (check-ins during a live term). **Hybrid Rev** is left as entered: the roster hybrid column is a running total, not that month. Employee, corporate, and partnership codes are not written here. Share both databases with the copilot-flow Notion integration. Default month is the previous complete Eastern calendar month. Local runs stay dry unless `--apply`.
 
 ```bash
 npm run report-monthly-sales
 MONTH=2026-09 npm run report-monthly-sales
 MONTH=2026-09 REGION=NYC npm run report-monthly-sales
+DRY_RUN=0 npm run report-monthly-sales -- --apply
 ```
+
+Deploy: `./deploy/deploy-monthly-sales-job.sh` (does not execute). Noon ET on the 1st writes the previous month. Cloud Run sets `DRY_RUN=0` and `NODE_ENV=production`, so that run updates Notion. Local runs still need `--apply`.
 
 ## Env
 

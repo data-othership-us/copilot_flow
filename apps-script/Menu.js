@@ -1,7 +1,8 @@
 /**
  * Co-Pilot menu on the Copilot base spreadsheet.
- * Refresh Review starts copilot-evaluate-copilots with EVALUATE_SKIP_APPLY=1
- * and --skip-apply, same as the local rebuild that keeps filled decisions.
+ * Refresh Review starts copilot-evaluate-copilots the same way the 9:30am
+ * schedule does: rebuild Review and Add to Modash, then apply decisions
+ * that are due.
  */
 const JOB_URL =
   "https://run.googleapis.com/v2/projects/marianatek-webhooks/locations/us-central1/jobs/copilot-evaluate-copilots";
@@ -19,7 +20,7 @@ function refreshReview() {
   const ui = SpreadsheetApp.getUi();
   const ok = ui.alert(
     "Refresh Review",
-    "Rebuild the Review tab from the latest evaluation queue. Decisions, notes, freeze dates, and sales cells already filled in stay on the sheet. Mariana Tek updates and emails still wait for the daily job. Add to Modash is rebuilt in the same run. This usually takes a few minutes.",
+    "Rebuild Review and Add to Modash, then apply decisions that are due. That updates Mariana Tek and sends emails. Renew, upgrade, downgrade, offboard, and never again still wait until the last day. This usually takes a few minutes.",
     ui.ButtonSet.OK_CANCEL,
   );
   if (ok !== ui.Button.OK) return;
@@ -41,7 +42,7 @@ function refreshReview() {
     }
     startRefresh_();
     SpreadsheetApp.getActive().toast(
-      "Review refresh started. Check Refresh status, then reload Review when it finishes.",
+      "Review job started. It rebuilds the tabs and applies decisions that are due. Check Refresh status, then reload when it finishes.",
       "Co-Pilot",
       10,
     );
@@ -69,14 +70,13 @@ function refreshStatus() {
 
 function startRefresh_() {
   const args = currentArgs_().filter((arg) => arg !== "--skip-apply");
-  args.push("--skip-apply");
   return api_("post", JOB_URL + ":run", {
     overrides: {
       containerOverrides: [
         {
           args,
           env: [
-            { name: "EVALUATE_SKIP_APPLY", value: "1" },
+            { name: "EVALUATE_SKIP_APPLY", value: "0" },
             { name: "DRY_RUN", value: "0" },
           ],
         },

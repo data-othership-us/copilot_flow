@@ -7,8 +7,6 @@
 --   - data-pipeline mt_membership_instances (name / start / end by user_id)
 --   - data-pipeline mt_reservations (check-ins → total + since membership_start)
 --   - data-pipeline mt_sessions (Social Playground check-ins; private/free MT class)
---   - copilots.discount_redemption (lifetime pretax; matched by every code on
---       this discount_id plus the stored copilot_db code, and by discount name)
 --   - data-pipeline stg_mt_discounts (promo_code_status; current code string by discount_id)
 --       View promo_code is the current MT code when discount_id matches, else copilot_db.
 --       Usage / cycle_points use that live code (and the voucher name via discount_id).
@@ -16,17 +14,19 @@
 --       that live code (intro-offer?id=). Stored copilot_db.offer_link is used
 --       only when there is no code.
 --   - data-pipeline stg_mt_orders via stg_mt_discounts.attr_name
---       (completed promo-attributed orders in the current membership term;
---       pretax is attr_subtotal; plus redemption_count_since_membership_end
---       after membership_end)
+--       (completed promo-attributed orders; pretax is attr_subtotal).
+--       Current term is clipped to the latest Co-Pilot membership.
+--       All-time is every completed order on the code, any date.
+--       redemption_count_since_membership_end is after membership_end.
 --   - copilots.copilot_utm_sessions (US snapshot of
 --       data-dashboard-463217.utm_tracking.copilot_utm_sessions)
 --       Individual offer-link sessions (utm_content = promo_code) joined to
 --       mt_orders for Co-Pilot 2-for intro products. Last-touch within 7 days.
---       Added to promo redemptions for cycle_points.
+--       Added to promo redemptions for cycle_points, and to all-time
+--       redemptions (an order already counted on the code is not counted again).
 --   - copilots.modash_content + modash_creators (Slack-bot CSV ingest)
 --       Join: contact_email ↔ creator email_raw, else split_ig_handles
---       (ops sheets may list several IG accounts in one cell).
+--       (ops sheets may list several IG accounts in one cell) plus tiktok_handle.
 --       Campaign impressions since the latest Co-Pilot membership start.
 --       Current-term stories / feed posts, scored per membership month
 --       (anniversary intervals from membership_start, clipped to membership_end).
@@ -48,17 +48,14 @@
 -- last_month_points: same formula for the previous complete Eastern
 --   calendar month (a September email ranks August). Still clipped to the
 --   live Co-Pilot term.
--- social_requirement_met: every completed membership interval has
---   4 stories or 1 grid post (reel, carousel, post, or video) in that
---   interval (OR, not both). Intervals are monthly from membership_start
---   (Jul 16 start → Jul 16–Aug 15, Aug 16–Sep 15, …) clipped to
---   membership_end. Vacuously true when no interval has finished yet.
---   The in-progress interval is excluded until its last day has passed.
--- social_requirement_met_last_month: the most recently completed
---   membership interval (NULL if none has finished).
+-- social_requirement_met_last_cycle_month: the most recently completed
+--   membership interval (NULL if none has finished). 4 stories or 1
+--   grid post (IG reel/carousel/post, or TikTok video) in that interval.
 -- social_requirement_months_met: each started interval with Met,
 --   Not met, or In progress. A current interval that already cleared
---   the bar is Met.
+--   the bar is Met. Intervals are monthly from membership_start
+--   (Jul 16 start → Jul 16–Aug 15, Aug 16–Sep 15, …) clipped to
+--   membership_end.
 -- Current-term stories / feed posts: posted_at in [membership_start, membership_end].
 -- Modash impressions: posted_at >= latest Co-Pilot membership start.
 --
@@ -338,48 +335,7 @@ playground_stats AS (
    AND DATE(pc.session_start_at, 'America/New_York') <= e.mem_end_date
   GROUP BY e.contact_email
 ),
-redemptions AS (
-  SELECT
-    contact_email,
-    SUM(redemption_count) AS redemption_count,
-    SUM(IF(UPPER(IFNULL(currency, '')) = 'USD', CAST(subtotal_pretax AS FLOAT64), 0)) AS redemption_subtotal_usd,
-    SUM(IF(UPPER(IFNULL(currency, '')) = 'CAD', CAST(subtotal_pretax AS FLOAT64), 0)) AS redemption_subtotal_cad
-  FROM (
-    SELECT DISTINCT
-      e.contact_email,
-      r.discount_code_name,
-      r.currency,
-      r.redemption_count,
-      r.subtotal_pretax
-    FROM enriched AS e
-    JOIN UNNEST(e.promo_keys) AS pk
-    JOIN (
-      SELECT
-        UPPER(TRIM(code)) AS promo_key,
-        discount_code_name,
-        currency,
-        redemption_count,
-        subtotal_pretax
-      FROM `YOUR_PROJECT.copilots.discount_redemption`,
-        UNNEST(IFNULL(discount_code, [])) AS code
-      WHERE TRIM(IFNULL(code, '')) != ''
-    ) AS r
-      ON r.promo_key = pk
-    UNION DISTINCT
-    SELECT
-      e.contact_email,
-      r.discount_code_name,
-      r.currency,
-      r.redemption_count,
-      r.subtotal_pretax
-    FROM enriched AS e
-    JOIN `YOUR_PROJECT.copilots.discount_redemption` AS r
-      ON NULLIF(TRIM(e.mt_discount_name), '') IS NOT NULL
-     AND TRIM(r.discount_code_name) = TRIM(e.mt_discount_name)
-  )
-  GROUP BY contact_email
-),
--- Map each active copilot → MT discount display name (for order attribution)
+-- Map each copilot → MT discount display name (for order attribution)
 discount_names AS (
   SELECT
     CAST(discount_id AS STRING) AS discount_id,
@@ -425,7 +381,6 @@ copilot_discount_name AS (
   ) AS d_code
     ON d_code.promo_key = UPPER(TRIM(e.promo_code))
   WHERE COALESCE(d_id.discount_name, d_code.discount_name) IS NOT NULL
-    AND e.mem_start IS NOT NULL
 ),
 -- Completed promo orders from Mariana Tek. Discount name is normalized the
 -- same way as copilot_monthly_promo_sales so spacing does not drop a match.
@@ -636,6 +591,54 @@ intro_sales_after_membership AS (
   FROM intro_orders_after_end
   GROUP BY contact_email
 ),
+-- Lifetime code orders: every completed order on this voucher, any date.
+promo_orders_all_time AS (
+  SELECT DISTINCT
+    cdn.contact_email,
+    o.order_id,
+    o.currency,
+    o.subtotal_pretax
+  FROM copilot_discount_name AS cdn
+  JOIN mt_promo_orders AS o
+    ON o.discount_name = REGEXP_REPLACE(TRIM(cdn.discount_name), r'\s+', ' ')
+),
+-- Lifetime intro-offer orders for every code on this copilot.
+intro_orders_all_time AS (
+  SELECT DISTINCT
+    e.contact_email,
+    i.order_id,
+    i.currency,
+    i.subtotal_pretax
+  FROM enriched AS e
+  JOIN UNNEST(e.promo_keys) AS pk
+  JOIN intro_offer_orders AS i
+    ON UPPER(TRIM(i.copilot_code)) = pk
+),
+-- All-time redemptions: code orders plus intro-offer orders.
+-- The same order_id on both paths counts once; the code pretax wins.
+sales_all_time AS (
+  SELECT
+    contact_email,
+    COUNT(*) AS redemption_count,
+    SUM(IF(UPPER(currency) = 'USD', subtotal_pretax, 0)) AS redemption_subtotal_usd,
+    SUM(IF(UPPER(currency) = 'CAD', subtotal_pretax, 0)) AS redemption_subtotal_cad
+  FROM (
+    SELECT
+      contact_email,
+      order_id,
+      ARRAY_AGG(currency ORDER BY src LIMIT 1)[OFFSET(0)] AS currency,
+      ARRAY_AGG(subtotal_pretax ORDER BY src LIMIT 1)[OFFSET(0)] AS subtotal_pretax
+    FROM (
+      SELECT contact_email, order_id, currency, subtotal_pretax, 0 AS src
+      FROM promo_orders_all_time
+      UNION ALL
+      SELECT contact_email, order_id, currency, subtotal_pretax, 1 AS src
+      FROM intro_orders_all_time
+    )
+    GROUP BY contact_email, order_id
+  )
+  GROUP BY contact_email
+),
 -- Creator emails exploded for matching when copilot_db.ig_handle is missing.
 modash_creator_emails AS (
   SELECT
@@ -646,7 +649,7 @@ modash_creator_emails AS (
   WHERE `YOUR_PROJECT.copilots.normalize_ig_handle`(c.profile) IS NOT NULL
     AND TRIM(email) != ''
 ),
--- One copilot → every Modash handle (roster IG + emails on the Creators CSV).
+-- One copilot → every Modash handle (roster IG + TikTok + emails on the Creators CSV).
 copilot_modash_handles AS (
   SELECT DISTINCT contact_email, ig_handle
   FROM (
@@ -655,6 +658,11 @@ copilot_modash_handles AS (
       h AS ig_handle
     FROM enriched AS e,
       UNNEST(e.ig_handles) AS h
+    UNION ALL
+    SELECT
+      e.contact_email,
+      `YOUR_PROJECT.copilots.normalize_ig_handle`(e.tiktok_handle) AS ig_handle
+    FROM enriched AS e
     UNION ALL
     SELECT
       e.contact_email,
@@ -689,12 +697,14 @@ modash_stats AS (
   FROM modash_posts_in_term
   GROUP BY contact_email
 ),
--- Current-term stories vs grid posts (reel, carousel, post, video). Caps at membership_end.
+-- Current-term stories vs grid posts (IG reel/carousel/post, TikTok video).
+-- Caps at membership_end.
 modash_posts_current_membership AS (
   SELECT
     e.contact_email,
     p.content_key,
     ANY_VALUE(LOWER(TRIM(p.content_type))) AS content_type,
+    ANY_VALUE(UPPER(TRIM(p.channel))) AS channel,
     ANY_VALUE(DATE(p.posted_at, 'America/New_York')) AS posted_date
   FROM enriched AS e
   JOIN copilot_modash_handles AS h
@@ -741,13 +751,19 @@ social_intervals AS (
     i.interval_end,
     COALESCE(COUNTIF(p.content_type = 'story'), 0) AS stories,
     COALESCE(
-      COUNTIF(p.content_type IN ('reel', 'carousel', 'post', 'video')),
+      COUNTIF(
+        p.content_type IN ('reel', 'carousel', 'post', 'video')
+        OR p.channel = 'TIKTOK'
+      ),
       0
     ) AS feed_posts,
     (
       COALESCE(COUNTIF(p.content_type = 'story'), 0) >= 4
       OR COALESCE(
-        COUNTIF(p.content_type IN ('reel', 'carousel', 'post', 'video')),
+        COUNTIF(
+          p.content_type IN ('reel', 'carousel', 'post', 'video')
+          OR p.channel = 'TIKTOK'
+        ),
         0
       ) >= 1
     ) AS met,
@@ -810,10 +826,8 @@ modash_current_stats AS (
     contact_email,
     SUM(stories) AS modash_stories_current_membership,
     SUM(feed_posts) AS modash_feed_posts_current_membership,
-    COALESCE(LOGICAL_AND(IF(completed, met, NULL)), TRUE)
-      AS social_requirement_met,
     MAX(IF(is_last_interval, met, NULL))
-      AS social_requirement_met_last_month,
+      AS social_requirement_met_last_cycle_month,
     COALESCE(
       ARRAY_TO_STRING(
         ARRAY_AGG(interval_label ORDER BY interval_start),
@@ -928,18 +942,13 @@ SELECT
   COALESCE(md.modash_impressions, 0) AS modash_impressions,
   COALESCE(mdc.modash_stories_current_membership, 0) AS modash_stories_current_membership,
   COALESCE(mdc.modash_feed_posts_current_membership, 0) AS modash_feed_posts_current_membership,
-  IF(
-    e.mem_start_date IS NULL OR e.mem_end_date IS NULL,
-    FALSE,
-    COALESCE(mdc.social_requirement_met, FALSE)
-  ) AS social_requirement_met,
-  mdc.social_requirement_met_last_month,
+  mdc.social_requirement_met_last_cycle_month,
   COALESCE(mdc.social_requirement_months_met, '') AS social_requirement_months_met,
 
-  -- Promo redemptions / sales — lifetime pretax (discount_redemption rollup)
-  r.redemption_count,
-  r.redemption_subtotal_usd,
-  r.redemption_subtotal_cad,
+  -- Promo redemptions / sales — lifetime pretax (code orders + intro offers)
+  COALESCE(r.redemption_count, 0) AS redemption_count,
+  COALESCE(r.redemption_subtotal_usd, 0) AS redemption_subtotal_usd,
+  COALESCE(r.redemption_subtotal_cad, 0) AS redemption_subtotal_cad,
 
   -- Promo redemptions / sales — pretax in the latest Co-Pilot membership term
   scm.redemption_count_current_membership,
@@ -1026,7 +1035,7 @@ LEFT JOIN session_stats AS sess
   ON sess.contact_email = e.contact_email
 LEFT JOIN playground_stats AS pg
   ON pg.contact_email = e.contact_email
-LEFT JOIN redemptions AS r
+LEFT JOIN sales_all_time AS r
   ON r.contact_email = e.contact_email
 LEFT JOIN sales_current_membership AS scm
   ON scm.contact_email = e.contact_email

@@ -63,24 +63,18 @@ function hasType(event, set) {
   return (event.eventType || []).some((type) => set.has(type));
 }
 
-function isExplicitlyPrivateOnly(event) {
-  const flags = event.publicPrivate || [];
-  return flags.includes("Private") && !flags.includes("Public");
+function isMarkedPrivate(event) {
+  return (event.publicPrivate || []).includes("Private");
 }
 
-/** Same public cut as event-automations OS email list. */
+/** Public specials only. Private always stays out, including Brand Activation. */
 export function isPublicEmailListEvent(event) {
   if (!event?.name || !event?.date) return false;
   if (isSocialPlayground(event)) return false;
   if (isNamedVibeBringer(event)) return false;
   if (hasType(event, HYBRID_TYPES)) return false;
   if (/^hybrid\b/i.test(event.name)) return false;
-  if (hasType(event, PRIVATE_TYPES) && !hasType(event, PUBLIC_SPECIAL_TYPES)) {
-    return false;
-  }
-  if (isExplicitlyPrivateOnly(event) && !hasType(event, PUBLIC_SPECIAL_TYPES)) {
-    return false;
-  }
+  if (hasType(event, PRIVATE_TYPES) || isMarkedPrivate(event)) return false;
   return hasType(event, PUBLIC_SPECIAL_TYPES);
 }
 

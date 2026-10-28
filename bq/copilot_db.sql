@@ -85,8 +85,11 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.copilots.copilot_db` (
 --     NOT synced: classes_*, tiktok_*, other_channels, ig_followers
 --     (ig_followers is onboard seed only; live count is Modash on copilot_performance).
 --     ig_url is rebuilt from every parsed sheet handle; kept when the sheet cell is empty.
---     After MERGE, copilot_db emails that are not already inactive and are
---     missing from every active tab (including blank status) are set inactive.
+--     After MERGE, roster status follows the Co-Pilot membership: a live
+--     term (active / pending / frozen / payment_failure) sets status=active,
+--     except an applied offboard / never again. Emails not on any active tab
+--     with no live membership (including blank status) are set inactive.
+--     48-hour grace after onboard / renew / upgrade / downgrade.
 --   System-owned (never overwrite from ops sheet): user_id, mt_email, mt_profile_link,
 --     discount_id, promo_code, offer_link,
 --     promoted_at, onboarded_at, acceptance_emailed_at, tiktok_*, other_channels.
