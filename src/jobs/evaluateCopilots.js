@@ -114,9 +114,6 @@ async function applyReadyItems(items, summary, attempted) {
             decision_at: "NOW",
             decision_source: "evaluation_sheet",
             ...(item.bbSales != null ? { bb_sales: item.bbSales } : {}),
-            ...(item.hybridSales != null
-              ? { hybrid_sales: item.hybridSales }
-              : {}),
             ...(item.newHybridSales != null
               ? { new_hybrid_sales: item.newHybridSales }
               : {}),
@@ -155,9 +152,6 @@ async function applyReadyItems(items, summary, attempted) {
           decision_at: "NOW",
           decision_source: "evaluation_sheet",
           ...(item.bbSales != null ? { bb_sales: item.bbSales } : {}),
-          ...(item.hybridSales != null
-            ? { hybrid_sales: item.hybridSales }
-            : {}),
           ...(item.newHybridSales != null
             ? { new_hybrid_sales: item.newHybridSales }
             : {}),
@@ -458,7 +452,7 @@ export async function evaluateCopilots() {
     }
     if (salesPatches.length) {
       console.log(
-        `   ✅ Wrote ${salesPatches.length} bb_sales / hybrid_sales / new_hybrid_sales update(s) to copilot_db`,
+        `   ✅ Wrote ${salesPatches.length} bb_sales / new_hybrid_sales update(s) to copilot_db`,
       );
     }
   }

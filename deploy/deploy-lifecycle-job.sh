@@ -32,10 +32,13 @@ CPU="${CPU:-1}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-3600}"
 EXECUTE_NOW="${EXECUTE_NOW:-0}"
 
+export DRY_RUN_VALUE="${DRY_RUN_VALUE:-0}"
+
 echo "==> Project:   ${PROJECT_ID}"
 echo "==> Region:    ${REGION}"
 echo "==> Job:       ${JOB_NAME}"
 echo "==> Args:      node ${JOB_ARGS}"
+echo "==> Dry run:   ${DRY_RUN_VALUE}"
 echo "==> Scheduler: ${SCHEDULER_NAME} (${SCHEDULE} ${TIME_ZONE})"
 echo "==> Image:     ${IMAGE_URI}"
 echo "==> SA:        ${SERVICE_ACCOUNT}"
@@ -47,6 +50,7 @@ fi
 
 echo "==> Building env file from .env → ${ENV_FILE}"
 python3 - <<'PY'
+import os
 from pathlib import Path
 
 root = Path.cwd()
@@ -64,7 +68,7 @@ skip = {
     "APPLICATION_LOOKBACK_DAYS",
 }
 forced = {
-    "DRY_RUN": "0",
+    "DRY_RUN": os.environ.get("DRY_RUN_VALUE", "0"),
     "NODE_ENV": "production",
     "SOCIAL_ENRICHMENT_PROVIDER": "apify",
     "BQ_PROJECT_ID": "data-dashboard-463217",

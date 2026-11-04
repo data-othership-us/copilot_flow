@@ -204,11 +204,22 @@ export const config = {
   hybrid: {
     notifyTo: env("HYBRID_NOTIFY_TO", "shannon@othership.us"),
     notifyCc: env("HYBRID_NOTIFY_CC", "stella.b@othership.us"),
+    discordChannelId: env("HYBRID_DISCORD_CHANNEL_ID", "1565036407649607690"),
+    discordBotToken: env("DISCORD_BOT_TOKEN", ""),
     testEmail: env("HYBRID_TEST_EMAIL", "tina@othership.us"),
     testCode: env("HYBRID_TEST_CODE", "123456"),
     confirmDatabaseId: env(
       "NOTION_HYBRID_CONFIRM_DATABASE_ID",
       "f1d845c86c444ef7b8f376b41297800c"
+    ),
+    creditUrlToronto: env(
+      "HYBRID_CREDIT_URL_TORONTO",
+      "https://othership.brandbot-checkout.com/to-co-pilot-hybrid-credit-swk.html"
+    ),
+    creditUrlNewYork: env("HYBRID_CREDIT_URL_NEW_YORK", ""),
+    requestFormUrl: env(
+      "HYBRID_REQUEST_FORM_URL",
+      "https://www.notion.so/1cb099af6e804c48af78b255f842beec?v=3f3271660d72818c8757000c7b7d174c"
     ),
     confirmFormUrl: env(
       "HYBRID_CONFIRM_FORM_URL",
@@ -265,6 +276,8 @@ export const config = {
       "Co-Pilot Management"
     ),
     gmailLabelIdManagement: env("GMAIL_API_LABEL_ID_MANAGEMENT", ""),
+    gmailLabelNameHybrid: env("GMAIL_API_LABEL_NAME_HYBRID", "hybrid-automation"),
+    gmailLabelIdHybrid: env("GMAIL_API_LABEL_ID_HYBRID", ""),
     gmailAutoLabel: envBool("GMAIL_API_AUTO_LABEL", true),
   },
 
@@ -276,17 +289,9 @@ export const config = {
       "COPILOT_BREATHWORK_COMMUNITY_URL",
       "https://apps.apple.com/redeem?ctx=offercodes&id=1590348936&code=COPILOT1"
     ),
-    seekerHubUrl: env(
-      "COPILOT_SEEKER_HUB_URL",
-      "https://app.notion.com/p/othership/Seeker-Hub-299271660d72803d8291e80032fdff4c"
-    ),
-    wayfinderHubUrl: env(
-      "COPILOT_WAYFINDER_HUB_URL",
-      "https://app.notion.com/p/othership/Wayfinder-Hub-299271660d7280398958ed331855e188"
-    ),
-    luminaryHubUrl: env(
-      "COPILOT_LUMINARY_HUB_URL",
-      "https://app.notion.com/p/othership/Luminary-Hub-299271660d7280f0be49fa910625ecc4"
+    hubUrl: env(
+      "COPILOT_HUB_URL",
+      "https://app.notion.com/p/3d5271660d7280ffb1a0cd8c40c9781f"
     ),
   },
 

@@ -36,17 +36,9 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
-function hubUrlForTier(tier) {
-  const key = normalizeTierKey(tier);
-  if (key === "luminary") return String(config.copilotLinks?.luminaryHubUrl || "").trim();
-  if (key === "seeker") return String(config.copilotLinks?.seekerHubUrl || "").trim();
-  return String(config.copilotLinks?.wayfinderHubUrl || "").trim();
-}
-
-function hubLinkHtml(tier) {
-  const titled = titleCaseTier(tier);
-  const label = `${titled} Hub`;
-  const href = hubUrlForTier(titled);
+function hubLinkHtml() {
+  const label = "Co-Pilot Hub";
+  const href = String(config.copilotLinks?.hubUrl || "").trim();
   if (!href) return escapeHtml(label);
   return monthlyLink(escapeHtml(href), escapeHtml(label));
 }
@@ -213,7 +205,7 @@ export function renderMonthlyEmailHtml(input) {
     promoCode: escapeHtml(input.promoCode || "—"),
     discountPercent: escapeHtml(String(discountPercent(tier))),
     offerLinkHtml: offerLinkHtml(input.offerLink),
-    hubHtml: hubLinkHtml(tier),
+    hubHtml: hubLinkHtml(),
     cycleHeadingHtml: monthlySectionHeading("This cycle"),
     offerHeadingHtml: monthlySectionHeading("To share"),
     reminderHeadingHtml: monthlySectionHeading("The monthly ask"),

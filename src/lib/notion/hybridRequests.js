@@ -1,5 +1,9 @@
 import { config, sleep } from "../../config.js";
-import { formatMatchLabel } from "../mt/classSessionTag.js";
+import {
+  formatClock,
+  formatMatchLabel,
+  scheduleSessionUrl,
+} from "../mt/classSessionTag.js";
 import { getNotionClient } from "./applications.js";
 import {
   buildCheckboxUpdate,
@@ -127,8 +131,40 @@ const REGION_STUDIOS = {
   Toronto: ["Adelaide", "Yorkville"],
 };
 
+const LOCATION_ALIASES = {
+  "Adelaide (TO)": "Adelaide",
+  "Yorkville (TO)": "Yorkville",
+  "Flatiron (NYC)": "Flatiron",
+  "Williamsburg (NYC)": "Williamsburg",
+};
+
+function studioName(value) {
+  const text = String(value || "").trim();
+  if (LOCATIONS[text]) return text;
+  if (LOCATION_ALIASES[text]) return LOCATION_ALIASES[text];
+  const stripped = text.replace(/\s*\((?:TO|NYC)\)\s*$/i, "");
+  return LOCATIONS[stripped] ? stripped : "";
+}
+
 const COMMUNITY_PROP = "Tell us more about the community you’re inviting!";
 const SECOND_DATE_PROP = "Second Preferred Date & Time ";
+
+/** The promo code is the title until the first confirm, then `code | time location`. */
+export function codeFromTitle(title) {
+  const text = String(title || "").trim();
+  const pipe = text.indexOf("|");
+  if (pipe === -1) return text;
+  return text.slice(0, pipe).trim();
+}
+
+/** Page title written once, when Copilot Confirm is checked. */
+export function confirmedRequestTitle(code, session) {
+  const time = formatClock(session?.time);
+  const location = String(session?.location || "").trim();
+  const when = [time, location].filter(Boolean).join(" ");
+  const base = String(code || "").trim();
+  return when ? `${base} | ${when}` : base;
+}
 
 export function calendarCardTitle(copilotName) {
   const name = String(copilotName || "").trim() || "Co-Pilot";
@@ -144,11 +180,19 @@ export function copilotDisplayName(copilot, fallbackCode) {
 }
 
 function sameCopilot(left, right) {
-  const leftEmail = String(left?.contact_email || "").trim().toLowerCase();
-  const rightEmail = String(right?.contact_email || "").trim().toLowerCase();
+  const leftEmail = String(left?.contact_email || "")
+    .trim()
+    .toLowerCase();
+  const rightEmail = String(right?.contact_email || "")
+    .trim()
+    .toLowerCase();
   if (leftEmail && leftEmail === rightEmail) return true;
-  const leftCode = String(left?.promo_code || "").trim().toUpperCase();
-  const rightCode = String(right?.promo_code || "").trim().toUpperCase();
+  const leftCode = String(left?.promo_code || "")
+    .trim()
+    .toUpperCase();
+  const rightCode = String(right?.promo_code || "")
+    .trim()
+    .toUpperCase();
   return Boolean(leftCode && leftCode === rightCode);
 }
 
@@ -157,12 +201,21 @@ function sameCopilot(left, right) {
  * still has to match a real copilot. Clear HYBRID_TEST_EMAIL to turn this off.
  */
 export function hybridTestCopilot(email, code) {
-  const allowedEmail = String(config.hybrid.testEmail || "").trim().toLowerCase();
-  const allowedCode = String(config.hybrid.testCode || "").trim().toUpperCase();
+  const allowedEmail = String(config.hybrid.testEmail || "")
+    .trim()
+    .toLowerCase();
+  const allowedCode = String(config.hybrid.testCode || "")
+    .trim()
+    .toUpperCase();
   if (!allowedEmail || !allowedCode) return null;
-  const submittedEmail = String(email || "").trim().toLowerCase();
-  const submittedCode = String(code || "").trim().toUpperCase();
-  if (submittedEmail !== allowedEmail || submittedCode !== allowedCode) return null;
+  const submittedEmail = String(email || "")
+    .trim()
+    .toLowerCase();
+  const submittedCode = String(code || "")
+    .trim()
+    .toUpperCase();
+  if (submittedEmail !== allowedEmail || submittedCode !== allowedCode)
+    return null;
   return {
     contact_email: allowedEmail,
     promo_code: allowedCode,
@@ -176,26 +229,34 @@ export function hybridTestCopilot(email, code) {
  * instead of emailing or creating a calendar card.
  */
 export function verifyCopilotMatch({ emailRow, codeRow, submittedCode } = {}) {
-  const code = String(submittedCode || "").trim().toUpperCase();
-  const emailCode = String(emailRow?.promo_code || "").trim().toUpperCase();
+  const code = String(submittedCode || "")
+    .trim()
+    .toUpperCase();
+  const emailCode = String(emailRow?.promo_code || "")
+    .trim()
+    .toUpperCase();
   if (emailRow && code && emailCode === code) return { copilot: emailRow };
-  if (emailRow && codeRow && sameCopilot(emailRow, codeRow)) return { copilot: emailRow };
-  if (!emailRow && !codeRow) return { hold: "No copilot matches that email and code." };
-  if (emailRow && !codeRow) return { hold: "That code is not on this copilot." };
-  if (!emailRow && codeRow) return { hold: "That email is not on the copilot for this code." };
+  if (emailRow && codeRow && sameCopilot(emailRow, codeRow))
+    return { copilot: emailRow };
+  if (!emailRow && !codeRow)
+    return { hold: "No copilot matches that email and code." };
+  if (emailRow && !codeRow)
+    return { hold: "That code is not on this copilot." };
+  if (!emailRow && codeRow)
+    return { hold: "That email is not on the copilot for this code." };
   return { hold: "Email and code belong to different copilots." };
 }
 
 export function studiosForRequest({
-  toLocations = [],
-  nyLocations = [],
-  location,
+  preferred = [],
   region,
 } = {}) {
-  const picks = [...toLocations, ...nyLocations, location].filter((name) => LOCATIONS[name]);
+  const picks = preferred.map(studioName).filter(Boolean);
   const names = [...new Set(picks)];
   const chosen = names.length ? names : REGION_STUDIOS[region] || [];
-  return chosen.map((name) => locationMeta(name)).filter((meta) => meta?.locationId);
+  return chosen
+    .map((name) => locationMeta(name))
+    .filter((meta) => meta?.locationId);
 }
 
 function readSlot(props, name) {
@@ -213,62 +274,70 @@ function readSlot(props, name) {
 
 function slotsFrom(props) {
   const first = readSlot(props, "Date");
-  const second = readSlot(props, SECOND_DATE_PROP) || readSlot(props, SECOND_DATE_PROP.trim());
+  const second =
+    readSlot(props, SECOND_DATE_PROP) ||
+    readSlot(props, SECOND_DATE_PROP.trim());
   const slots = [];
-  if (first) {
-    if (!first.hhmmss) {
-      const parsed = parseStartTime(getRichText(props, "Start Time"));
-      if (parsed) first.hhmmss = parsed.hhmmss;
-    }
-    slots.push(first);
-  }
-  if (second && !(first && second.date === first.date && second.hhmmss === first.hhmmss)) {
+  if (first) slots.push(first);
+  if (
+    second &&
+    !(first && second.date === first.date && second.hhmmss === first.hhmmss)
+  ) {
     slots.push(second);
   }
   return slots;
 }
 
-export function parseMatchLog(raw) {
-  if (!raw) return [];
+function matchPayload(raw) {
+  if (!raw) return { sessions: [], slots: null };
   try {
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item) => item && item.id);
+    if (Array.isArray(parsed)) {
+      return { sessions: parsed.filter((item) => item && item.id), slots: null };
+    }
+    if (parsed && Array.isArray(parsed.sessions)) {
+      return {
+        sessions: parsed.sessions.filter((item) => item && item.id),
+        slots: Array.isArray(parsed.slots) ? parsed.slots : null,
+      };
+    }
   } catch {
-    return [];
+    return { sessions: [], slots: null };
   }
+  return { sessions: [], slots: null };
 }
 
-export function serializeMatchLog(matches) {
-  const payload = JSON.stringify(
-    (matches || []).map((match) => ({
-      id: String(match.id),
-      location: match.location || "",
-      city: match.city || "",
-      date: match.date || "",
-      time: match.time || "",
-      className: match.className || "",
-      capacity: match.capacity ?? null,
-      available: match.available ?? null,
-    }))
-  );
+export function parseMatchLog(raw) {
+  return matchPayload(raw).sessions;
+}
+
+/** Slots we last emailed about. Null means this request was saved before we stored them. */
+export function parseLoggedSlots(raw) {
+  return matchPayload(raw).slots;
+}
+
+export function serializeMatchLog(matches, slots) {
+  const sessions = (matches || []).map((match) => ({
+    id: String(match.id),
+    location: match.location || "",
+    city: match.city || "",
+    date: match.date || "",
+    time: match.time || "",
+    className: match.className || "",
+    capacity: match.capacity ?? null,
+    available: match.available ?? null,
+  }));
+  const payload = JSON.stringify({
+    sessions,
+    slots: (slots || []).map((slot) => ({
+      date: slot.date || "",
+      hhmmss: slot.hhmmss || "",
+    })),
+  });
   if (payload.length > 2000) {
     throw new Error("Too many matching sessions to store on the request");
   }
   return payload;
-}
-
-export function sessionTodoLabel(session) {
-  return `Confirm this session · ${session.id} · ${formatMatchLabel(session)}`;
-}
-
-/** Session id from a request-page to-do. Blank if this to-do isn't a confirmation. */
-export function sessionIdFromTodo(text) {
-  const raw = String(text || "").trim();
-  const labeled = raw.match(/Confirm this session · (\d{4,})/);
-  if (labeled) return labeled[1];
-  const loose = raw.match(/^(?:session\s+)?(\d{4,})$/i);
-  return loose ? loose[1] : "";
 }
 
 export function confirmedSessionIds(raw) {
@@ -282,7 +351,7 @@ export function confirmedSessionIds(raw) {
 export function pageIdFromUrl(url) {
   const text = String(url || "");
   const dashed = text.match(
-    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
   );
   if (dashed) return dashed[0];
   const compact = text.match(/[0-9a-f]{32}/gi);
@@ -291,23 +360,23 @@ export function pageIdFromUrl(url) {
 
 function normalizeRequest(page) {
   const props = page.properties || {};
-  const regionRaw = getSelect(props, "Format");
-  const region = regionRaw === "New York" || regionRaw === "Toronto" ? regionRaw : "";
-  const toLocations = getMultiSelectNames(props, "Preferred Location(s)");
-  const nyLocations = getMultiSelectNames(props, "Preferred Location(s) (1)");
-  const location = getSelect(props, "Location");
+  const regionRaw = getSelect(props, "City") || getSelect(props, "Format");
+  const region =
+    regionRaw === "New York" || regionRaw === "Toronto" ? regionRaw : "";
+  const preferred = getMultiSelectNames(props, "Preferred Location");
   const slots = slotsFrom(props);
   const estimated = getNumber(props, "Estimated Guest Count");
   return {
     id: page.id,
     url: page.url,
-    code: getTitle(props, "Co-pilot Code") || getTitle(props, "Name"),
+    title: getTitle(props, "Co-pilot Code") || getTitle(props, "Name"),
+    code: codeFromTitle(getTitle(props, "Co-pilot Code") || getTitle(props, "Name")),
     email: getEmail(props, "Email"),
     region,
-    toLocations,
-    nyLocations,
-    location,
-    locations: studiosForRequest({ toLocations, nyLocations, location, region }),
+    locations: studiosForRequest({
+      preferred,
+      region,
+    }),
     slots,
     guestCount: estimated == null ? getNumber(props, "Guest Count") : estimated,
     community: getRichText(props, COMMUNITY_PROP),
@@ -320,6 +389,7 @@ function normalizeRequest(page) {
     matchLog: getRichText(props, "Match Log"),
     hold: getRichText(props, "Hold"),
     copilotEmailed: getCheckbox(props, "Copilot Emailed"),
+    copilotConfirm: getCheckbox(props, "Copilot Confirm"),
     mtTagged: getCheckbox(props, "MT Tagged"),
   };
 }
@@ -343,8 +413,11 @@ async function queryAll(databaseId, filter) {
 }
 
 export async function listHybridRequests() {
-  const databaseId = String(config.notion.hybridRequestsDatabaseId || "").trim();
-  if (!databaseId) throw new Error("Missing NOTION_HYBRID_REQUESTS_DATABASE_ID");
+  const databaseId = String(
+    config.notion.hybridRequestsDatabaseId || "",
+  ).trim();
+  if (!databaseId)
+    throw new Error("Missing NOTION_HYBRID_REQUESTS_DATABASE_ID");
   const pages = await queryAll(databaseId);
   return pages.map(normalizeRequest);
 }
@@ -360,7 +433,9 @@ function normalizeConfirmation(page) {
   const props = page.properties || {};
   return {
     id: page.id,
-    sessionId: sessionIdFromTitle(getTitle(props, "Session") || getTitle(props, "Name")),
+    sessionId: sessionIdFromTitle(
+      getTitle(props, "Session") || getTitle(props, "Name"),
+    ),
     email: getEmail(props, "Email"),
     code: getRichText(props, "Code"),
     processed: getCheckbox(props, "Processed"),
@@ -371,7 +446,9 @@ export async function listHybridConfirmations() {
   const databaseId = String(config.hybrid.confirmDatabaseId || "").trim();
   if (!databaseId) return [];
   const pages = await queryAll(databaseId);
-  return pages.map(normalizeConfirmation).filter((row) => !row.processed && row.sessionId);
+  return pages
+    .map(normalizeConfirmation)
+    .filter((row) => !row.processed && row.sessionId);
 }
 
 export async function markConfirmationProcessed(pageId) {
@@ -409,7 +486,10 @@ function mention(userId) {
 }
 
 function holdNotice() {
-  const ids = [config.hybrid.shannonNotionUserId, config.hybrid.stellaNotionUserId]
+  const ids = [
+    config.hybrid.shannonNotionUserId,
+    config.hybrid.stellaNotionUserId,
+  ]
     .map((id) => String(id || "").trim())
     .filter(Boolean);
   const parts = [];
@@ -419,20 +499,34 @@ function holdNotice() {
   });
   parts.push(
     rich(
-      " Confirmed session. Paste the Brandbot event credit link into Event Credit Link on the request if it isn't there yet. This session is tagged Reduced, and the copilot is emailed once that link is on the request."
-    )
+      " Confirmed session. Toronto uses the shared Co-Pilot hybrid credit link unless Event Credit Link is filled. New York needs that link pasted. This session is tagged Reduced, and the copilot is emailed once a credit link is available.",
+    ),
   );
   return paragraph(parts);
 }
 
-function cardBlocks({ displayName, email, code, requestUrl, guestCount, community, notes, sessions }) {
+function cardBlocks({
+  displayName,
+  email,
+  code,
+  requestUrl,
+  guestCount,
+  community,
+  notes,
+  sessions,
+}) {
   const blocks = [holdNotice()];
   for (const session of sessions) {
     const spots =
       session.available == null
         ? ""
         : ` · ${session.available}${session.capacity == null ? "" : ` of ${session.capacity}`} spots open`;
-    const when = [session.date, session.time, session.location, session.className]
+    const when = [
+      session.date,
+      session.time,
+      session.location,
+      session.className,
+    ]
       .filter(Boolean)
       .join(" · ");
     blocks.push(paragraph([rich(`${when}${spots} · MT ${session.id}`)]));
@@ -443,24 +537,27 @@ function cardBlocks({ displayName, email, code, requestUrl, guestCount, communit
       rich(displayName || "—"),
       rich(email ? ` <${email}>` : ""),
     ]),
-    paragraph([rich("Code: ", { bold: true }), rich(code || "—")])
+    paragraph([rich("Code: ", { bold: true }), rich(code || "—")]),
   );
   if (community) {
-    blocks.push(paragraph([rich("Community: ", { bold: true }), rich(community)]));
+    blocks.push(
+      paragraph([rich("Community: ", { bold: true }), rich(community)]),
+    );
   }
   blocks.push(
     paragraph([
       rich("Expected guests: ", { bold: true }),
       rich(guestCount == null ? "—" : String(guestCount)),
-    ])
+    ]),
   );
-  if (notes) blocks.push(paragraph([rich("Notes: ", { bold: true }), rich(notes)]));
+  if (notes)
+    blocks.push(paragraph([rich("Notes: ", { bold: true }), rich(notes)]));
   if (requestUrl) {
     blocks.push(
       paragraph([
         rich("Request: ", { bold: true }),
         rich(requestUrl, { link: requestUrl }),
-      ])
+      ]),
     );
   }
   blocks.push(heading("Booking Checklist [Internal Use]"));
@@ -472,8 +569,14 @@ function cardProperties({ displayName, guestCount, sessions }) {
   const primary = sessions[0];
   const title = calendarCardTitle(displayName);
   const hour = Number(String(primary?.time || "").slice(0, 2));
-  const locations = [...new Set(sessions.map((session) => session.location).filter(Boolean))];
-  const formats = [...new Set(sessions.map((session) => inferFormat(session.className)).filter(Boolean))];
+  const locations = [
+    ...new Set(sessions.map((session) => session.location).filter(Boolean)),
+  ];
+  const formats = [
+    ...new Set(
+      sessions.map((session) => inferFormat(session.className)).filter(Boolean),
+    ),
+  ];
   const props = {
     ...buildTitleUpdate("Name", title),
     ...buildDateUpdate("Date", primary?.date),
@@ -482,9 +585,13 @@ function cardProperties({ displayName, guestCount, sessions }) {
     "Event Type": { multi_select: [{ name: "Paid Hybrid" }] },
     "Public/Private": { multi_select: [{ name: "Public" }] },
   };
-  if (locations.length) props.Location = { multi_select: locations.map((name) => ({ name })) };
+  if (locations.length)
+    props.Location = { multi_select: locations.map((name) => ({ name })) };
+  const reserveUrl = scheduleSessionUrl(primary);
+  if (reserveUrl) props["Public Link"] = { url: reserveUrl };
   if (primary?.city) props.City = { select: { name: primary.city } };
-  if (formats.length === 1) props.Format = { multi_select: [{ name: formats[0] }] };
+  if (formats.length === 1)
+    props.Format = { multi_select: [{ name: formats[0] }] };
   const dayPart = timeOfDay(hour);
   if (dayPart) props["Time of Day"] = { multi_select: [{ name: dayPart }] };
   return props;
@@ -508,10 +615,23 @@ export async function ensureCalendarCard(details) {
   const databaseId = String(config.notion.eventsDatabaseId || "").trim();
   if (!databaseId) throw new Error("Missing NOTION_EVENTS_DATABASE_ID");
   const sessions = details.sessions || [];
-  if (!sessions.length) throw new Error("Need at least one session for the calendar card");
+  if (!sessions.length)
+    throw new Error("Need at least one session for the calendar card");
   const title = calendarCardTitle(details.displayName);
-  const existing = await findExistingCalendarCard({ title, date: sessions[0].date });
+  const existing = await findExistingCalendarCard({
+    title,
+    date: sessions[0].date,
+  });
   if (existing?.url) {
+    const reserveUrl = scheduleSessionUrl(sessions[0]);
+    const current = getUrl(existing.properties || {}, "Public Link");
+    if (reserveUrl && !current) {
+      const notion = getNotionClient();
+      await notion.pages.update({
+        page_id: existing.id,
+        properties: { "Public Link": { url: reserveUrl } },
+      });
+    }
     return { id: existing.id, url: existing.url, created: false };
   }
   const notion = getNotionClient();
@@ -582,41 +702,81 @@ export async function managementApproval(pageId) {
   return { found: false, checked: false };
 }
 
-/** To-dos on the request that pick a Mariana Tek session. */
-export async function listSessionChoices(pageId) {
-  const blocks = await listChildBlocks(pageId);
-  return blocks
-    .filter((block) => block.type === "to_do")
-    .map((block) => ({
-      id: sessionIdFromTodo(todoText(block)),
-      checked: Boolean(block.to_do.checked),
-    }))
-    .filter((choice) => choice.id);
+const BOOKING_NOTE_PREFIX = "We'll book your community into:";
+const BOOKING_CONFIRM_LINE =
+  "Check the box underneath Copilot Confirm below to confirm the hybrid booking.";
+
+function blockPlainText(block) {
+  if (block.type === "to_do") return todoText(block);
+  const parts = block[block.type]?.rich_text || [];
+  return parts.map((part) => part.plain_text || "").join("").trim();
+}
+
+/** Copilot-written notes, without the booking line this job adds. */
+export function copilotNotes(notes) {
+  const text = String(notes || "").trim();
+  const at = text.indexOf(BOOKING_NOTE_PREFIX);
+  if (at === -1) return text;
+  return text.slice(0, at).trim();
+}
+
+function bookingNoteProperty(sessions, existingNotes = "") {
+  const lines = (sessions || [])
+    .map((session) => {
+      const spots =
+        session.available == null ? "" : ` · ${session.available} spots open`;
+      return `${formatMatchLabel(session)}${spots}`;
+    })
+    .filter(Boolean);
+  const kept = copilotNotes(existingNotes);
+  const richText = [];
+  if (kept) {
+    richText.push({ type: "text", text: { content: `${kept}\n` } });
+  }
+  if (lines.length) {
+    richText.push({
+      type: "text",
+      text: { content: `${BOOKING_NOTE_PREFIX} ${lines.join("; ")}. ` },
+    });
+    richText.push({
+      type: "text",
+      text: { content: BOOKING_CONFIRM_LINE },
+      annotations: {
+        bold: true,
+        italic: false,
+        strikethrough: false,
+        underline: true,
+        code: false,
+        color: "purple",
+      },
+    });
+  }
+  return { rich_text: richText };
 }
 
 /**
- * Add one unchecked to-do per suggested session. Existing ones stay as they are,
- * including ones Shannon or Stella already checked.
+ * Write the session we'll book into Notes. The page body stays empty.
+ * A note the copilot already typed is kept above the booking line.
  */
-export async function ensureSessionChoices(pageId, sessions) {
-  const existing = await listSessionChoices(pageId);
-  const have = new Set(existing.map((choice) => choice.id));
-  const missing = (sessions || []).filter((session) => session?.id && !have.has(String(session.id)));
-  if (!missing.length) return existing;
-  const children = [];
-  if (!existing.length) {
-    children.push(
-      paragraph([
-        rich(
-          "Check the session you want. We'll email you how your community buys the $35 credit and books into that class."
-        ),
-      ])
-    );
-  }
-  for (const session of missing) children.push(todo(sessionTodoLabel(session)));
+export async function syncBookingNote(pageId, sessions, existingNotes = "") {
+  const blocks = await listChildBlocks(pageId);
   const notion = getNotionClient();
-  await notion.blocks.children.append({ block_id: pageId, children });
-  return listSessionChoices(pageId);
+  for (const block of blocks) {
+    const text = blockPlainText(block);
+    const stale =
+      (block.type === "to_do" && /Confirm this session · \d{4,}/.test(text)) ||
+      (block.type === "paragraph" &&
+        (!text ||
+          text.startsWith("Check the Free Flow you want") ||
+          text.startsWith(BOOKING_NOTE_PREFIX) ||
+          text.startsWith("Check Copilot Confirm")));
+    if (!stale) continue;
+    await notion.blocks.delete({ block_id: block.id });
+  }
+  await notion.pages.update({
+    page_id: pageId,
+    properties: { Notes: bookingNoteProperty(sessions, existingNotes) },
+  });
 }
 
 function creditUrlFromBlocks(blocks) {
@@ -646,7 +806,13 @@ function richTextValue(value) {
 
 export async function updateHybridRequest(pageId, fields) {
   const properties = {
-    ...(fields.calendarCard ? { "Calendar Card": { url: fields.calendarCard } } : {}),
+    ...(fields.title ? buildTitleUpdate("Co-pilot Code", fields.title) : {}),
+    ...(fields.calendarCard
+      ? { "Calendar Card": { url: fields.calendarCard } }
+      : {}),
+    ...(fields.eventCreditLink
+      ? { "Event Credit Link": { url: fields.eventCreditLink } }
+      : {}),
     ...(fields.availabilitySent != null
       ? buildCheckboxUpdate("Availability Sent", fields.availabilitySent)
       : {}),
@@ -659,8 +825,15 @@ export async function updateHybridRequest(pageId, fields) {
     ...(fields.copilotEmailed != null
       ? buildCheckboxUpdate("Copilot Emailed", fields.copilotEmailed)
       : {}),
-    ...(fields.mtTagged != null ? buildCheckboxUpdate("MT Tagged", fields.mtTagged) : {}),
-    ...(fields.matchLog != null ? { "Match Log": richTextValue(fields.matchLog) } : {}),
+    ...(fields.copilotConfirm != null
+      ? buildCheckboxUpdate("Copilot Confirm", fields.copilotConfirm)
+      : {}),
+    ...(fields.mtTagged != null
+      ? buildCheckboxUpdate("MT Tagged", fields.mtTagged)
+      : {}),
+    ...(fields.matchLog != null
+      ? { "Match Log": richTextValue(fields.matchLog) }
+      : {}),
     ...(fields.hold != null ? { Hold: richTextValue(fields.hold) } : {}),
   };
   if (!Object.keys(properties).length) return;

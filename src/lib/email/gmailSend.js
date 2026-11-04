@@ -22,6 +22,10 @@ const MANAGEMENT_EMAIL_KINDS = new Set([
   "copilot_payment_nudge",
   "copilot_resubmit_handles",
   "copilot_monthly",
+]);
+
+/** Hybrid booking mail gets its own Gmail label. */
+const HYBRID_EMAIL_KINDS = new Set([
   "copilot_hybrid_request",
   "copilot_hybrid_confirmed",
   "copilot_hybrid_declined",
@@ -104,7 +108,14 @@ function isCustomUserLabelId(labelId) {
 }
 
 function labelConfigForKind(emailKind) {
-  if (MANAGEMENT_EMAIL_KINDS.has(String(emailKind || "").trim())) {
+  const kind = String(emailKind || "").trim();
+  if (HYBRID_EMAIL_KINDS.has(kind)) {
+    return {
+      name: config.email.gmailLabelNameHybrid,
+      pinnedId: config.email.gmailLabelIdHybrid,
+    };
+  }
+  if (MANAGEMENT_EMAIL_KINDS.has(kind)) {
     return {
       name: config.email.gmailLabelNameManagement,
       pinnedId: config.email.gmailLabelIdManagement,
@@ -132,7 +143,11 @@ async function resolveLabelId(gmail, userId, { name, pinnedId } = {}) {
   if (cachedLabelIds.has(labelName)) return cachedLabelIds.get(labelName);
 
   const labelsResp = await gmail.users.labels.list({ userId });
-  const existing = (labelsResp.data.labels || []).find((l) => l.name === labelName);
+  const wanted = labelName.toLowerCase().replace(/[\s-]+/g, " ");
+  const existing = (labelsResp.data.labels || []).find((label) => {
+    const current = String(label.name || "").toLowerCase().replace(/[\s-]+/g, " ");
+    return current === wanted || current.endsWith(`/${wanted}`);
+  });
   if (existing?.id) {
     cachedLabelIds.set(labelName, existing.id);
     return existing.id;

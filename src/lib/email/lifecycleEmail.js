@@ -101,17 +101,9 @@ function upgradePerkListHtml(newTier) {
   return `<ul>${lis}</ul>`;
 }
 
-function hubUrlForTier(tier) {
-  const key = normalizeTierKey(tier);
-  if (key === "luminary") return String(config.copilotLinks?.luminaryHubUrl || "").trim();
-  if (key === "seeker") return String(config.copilotLinks?.seekerHubUrl || "").trim();
-  return String(config.copilotLinks?.wayfinderHubUrl || "").trim();
-}
-
-function hubLinkHtml(tier) {
-  const titled = String(tier || "").trim() || "Wayfinder";
-  const label = `${titled} Hub`;
-  const href = hubUrlForTier(titled);
+function hubLinkHtml() {
+  const label = "Co-Pilot Hub";
+  const href = String(config.copilotLinks?.hubUrl || "").trim();
   if (!href) return escapeHtml(label);
   return `<a href="${escapeHtml(href)}">${escapeHtml(label)}</a>`;
 }
@@ -227,8 +219,8 @@ function renderLifecycleHtml(kind, input) {
       kind === "downgrade"
         ? downgradePerkListHtml(newTier)
         : upgradePerkListHtml(newTier),
-    hubHtml: hubLinkHtml(newTier || tier),
-    hubLink: hubLinkHtml(newTier || tier),
+    hubHtml: hubLinkHtml(),
+    hubLink: hubLinkHtml(),
     breathworkPersonalLink: linkOrPlaceholder(
       config.copilotLinks?.breathworkPersonalUrl
     ),

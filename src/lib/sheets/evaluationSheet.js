@@ -42,6 +42,7 @@ const REVIEW_HEADERS = [
   "redemption_count_since_membership_end",
   "bb_sales",
   "hybrid_sales",
+  "hybrid_current_cycle",
   "new_hybrid_sales",
   "decision",
   "freeze_until",
@@ -72,6 +73,7 @@ const COL = {
   membershipEnd: headerCol("membership_end"),
   bbSales: headerCol("bb_sales"),
   hybridSales: headerCol("hybrid_sales"),
+  hybridCurrentCycle: headerCol("hybrid_current_cycle"),
   newHybridSales: headerCol("new_hybrid_sales"),
   decision: headerCol("decision"),
   freezeUntil: headerCol("freeze_until"),
@@ -86,7 +88,6 @@ const PRESERVED_COLS = [
   COL.newEmail,
   COL.decisionNotes,
   COL.bbSales,
-  COL.hybridSales,
   COL.newHybridSales,
 ];
 
@@ -1019,6 +1020,7 @@ export function rowFromQueue(r) {
     fmtNum(r.redemption_count_since_membership_end),
     fmtNum(r.bb_sales),
     fmtNum(r.hybrid_sales),
+    fmtNum(r.hybrid_current_cycle),
     fmtNum(r.new_hybrid_sales),
     "",
     "",
@@ -1295,7 +1297,9 @@ export async function writeAddToModashQueue(addRows, { outliers = [] } = {}) {
  * Rewrite Review from the queue. Holds (payment-method, last-day wait,
  * apply-failed) sort last; otherwise region → tier → days to expiry.
  * Preserves Christine's decision / freeze_until / decision_notes / bb_sales /
- * hybrid_sales / new_hybrid_sales for people still in the queue. Filled yellow
+ * new_hybrid_sales for people still in the queue. hybrid_sales is the roster
+ * total plus every checked-in event credit. hybrid_current_cycle is rewritten
+ * from check-ins inside the current Co-Pilot term. Filled yellow
  * update cells (name, promo, ig, emails) are kept when they differ from the
  * queue or the row is a sparse manual draft (email + edits, no membership
  * metrics). Those drafts stay even with a blank decision. If someone
@@ -1669,13 +1673,9 @@ export async function listSalesWritebacks(queueRows) {
   for (const r of rows) {
     const q = fromQueue.get(r.email) || {};
     const bb = parseMoney(r.cells[COL.bbSales]);
-    const hybrid = parseMoney(r.cells[COL.hybridSales]);
     const newHybrid = parseMoney(r.cells[COL.newHybridSales]);
     const fields = {};
     if (bb != null && bb !== parseMoney(q.bb_sales)) fields.bb_sales = bb;
-    if (hybrid != null && hybrid !== parseMoney(q.hybrid_sales)) {
-      fields.hybrid_sales = hybrid;
-    }
     if (newHybrid != null && newHybrid !== parseMoney(q.new_hybrid_sales)) {
       fields.new_hybrid_sales = newHybrid;
     }

@@ -79,6 +79,7 @@ WITH queued AS (
     p.last_month_points,
     p.sheet_bb_sales AS bb_sales,
     p.sheet_hybrid_sales AS hybrid_sales,
+    p.hybrid_current_cycle,
     p.new_hybrid_sales,
     p.sheet_membership_expiry,
     p.decision,
@@ -151,6 +152,7 @@ SELECT
   redemption_count_since_membership_end,
   bb_sales,
   hybrid_sales,
+  hybrid_current_cycle,
   new_hybrid_sales,
   sheet_membership_expiry
 FROM flagged

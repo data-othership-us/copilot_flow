@@ -4,44 +4,49 @@
  *   DRY_RUN=1 npm run process-hybrid-requests
  *   DRY_RUN=0 npm run process-hybrid-requests -- --apply
  *
- * A request is emailed right away. Times outside Mon–Fri 7:00 AM–3:30 PM and
- * Mon–Wed from 9:00 PM get a note that they aren't available, with no page
- * link. In-window matches add a to-do per session on the request and email
- * that page. Checking a to-do (the copilot, or Shannon or Stella) creates the
- * Global Events card and tags the session Reduced. The confirmation email
- * goes out once Event Credit Link is filled, with the Brandbot checkout link
- * and the schedule link that opens that class. Local runs stay dry unless
- * --apply.
+ * A request is emailed right away with the Free Flow the group will be booked
+ * into. One session when it has room for the guest count. When it does not,
+ * the smallest set of sessions that covers the count. Checking Copilot Confirm
+ * on the request creates the Global Events card and tags each session Reduced.
+ * The confirmation email goes out once Event Credit Link is filled. Local runs
+ * stay dry unless --apply.
  */
 import { config } from "../config.js";
-import { getCopilotByAnyEmail, getCopilotByPromoCode } from "../lib/bq/copilotOps.js";
+import {
+  getCopilotByAnyEmail,
+  getCopilotByPromoCode,
+} from "../lib/bq/copilotOps.js";
 import {
   sendHybridBookedEmail,
   sendHybridRequestEmail,
 } from "../lib/email/hybridEmail.js";
+import { notifyHybridDiscord } from "../lib/discord/hybridNotify.js";
 import { isEmailSendConfigured } from "../lib/email/gmailSend.js";
 import {
-  fitsGuestCount,
   formatRequestedTime,
   formatSuggestion,
+  isHybridFreeFlow,
+  isHybridWindow,
   isSlotInHybridWindow,
   listSessionsOnDate,
   loadSessionMatch,
+  pickBookingPlan,
   scheduleSessionUrl,
-  sessionsOverlapping,
+  sessionsOnDate,
   tagClassSession,
 } from "../lib/mt/classSessionTag.js";
 import {
-  confirmedSessionIds,
+  confirmedRequestTitle,
   copilotDisplayName,
+  copilotNotes,
   ensureCalendarCard,
-  ensureSessionChoices,
   findCreditLink,
   hybridTestCopilot,
   listHybridRequests,
-  listSessionChoices,
+  parseLoggedSlots,
   parseMatchLog,
   serializeMatchLog,
+  syncBookingNote,
   updateHybridRequest,
   verifyCopilotMatch,
 } from "../lib/notion/hybridRequests.js";
@@ -61,34 +66,67 @@ export function isHybridDryRun({
 
 function label(request) {
   const slot = request.slots?.[0];
-  return [request.code || request.email || request.id, slot?.date, request.locations?.[0]?.name]
+  return [
+    request.code || request.email || request.id,
+    slot?.date,
+    request.locations?.[0]?.name,
+  ]
     .filter(Boolean)
     .join(" · ");
 }
 
-async function findSuggestions(request) {
+function hybridDiscordText({ title, request, displayName, sessions, extra, link }) {
+  const who = [
+    displayName || request.code,
+    request.email,
+    request.guestCount == null ? "" : `${request.guestCount} guests`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return [
+    `**${title}**`,
+    "",
+    who,
+    ...(sessions || []).map((match) => `• ${formatSuggestion(match)}`),
+    extra || "",
+    link || "",
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+}
+
+async function loadDay(request, slot) {
+  const matches = [];
   const seen = new Set();
-  const overlaps = [];
-  for (const slot of request.slots || []) {
-    if (!slot.hhmmss) continue;
-    for (const studio of request.locations || []) {
-      const sessions = await listSessionsOnDate(studio.locationId, slot.date);
-      const hits = sessionsOverlapping(sessions, {
-        location: studio.name,
-        date: slot.date,
-        hhmmss: slot.hhmmss,
-        city: studio.city,
-      });
-      for (const hit of hits) {
-        if (seen.has(hit.id)) continue;
-        seen.add(hit.id);
-        overlaps.push(hit);
-      }
+  for (const studio of request.locations || []) {
+    const sessions = await listSessionsOnDate(studio.locationId, slot.date);
+    for (const match of sessionsOnDate(sessions, {
+      location: studio.name,
+      date: slot.date,
+      city: studio.city,
+    })) {
+      if (seen.has(match.id)) continue;
+      seen.add(match.id);
+      matches.push(match);
     }
   }
-  overlaps.sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
-  const suggestions = overlaps.filter((match) => fitsGuestCount(match, request.guestCount));
-  return { overlaps, suggestions };
+  const atTime = matches.filter((match) => match.time === slot.hhmmss);
+  const freeAtStart = atTime.filter(
+    (match) =>
+      isHybridFreeFlow(match.className) &&
+      isHybridWindow({ date: match.date, hhmmss: match.time }),
+  );
+  const later = matches.filter(
+    (match) =>
+      match.time > slot.hhmmss &&
+      isHybridFreeFlow(match.className) &&
+      isHybridWindow({ date: match.date, hhmmss: match.time }),
+  );
+  return {
+    anySessions: matches.length > 0,
+    guidedOnly: atTime.length > 0 && freeAtStart.length === 0,
+    suggestions: pickBookingPlan(freeAtStart, later, request.guestCount),
+  };
 }
 
 async function setHold(request, hold, dryRun) {
@@ -106,7 +144,9 @@ async function setHold(request, hold, dryRun) {
 }
 
 function outsideSlots(request) {
-  return (request.slots || []).filter((slot) => slot.hhmmss && !isSlotInHybridWindow(slot));
+  return (request.slots || []).filter(
+    (slot) => slot.hhmmss && !isSlotInHybridWindow(slot),
+  );
 }
 
 function openSlots(request) {
@@ -116,8 +156,12 @@ function openSlots(request) {
 async function copilotFor(request) {
   const testCopilot = hybridTestCopilot(request.email, request.code);
   if (testCopilot) return { copilot: testCopilot, test: true };
-  const emailRow = request.email ? await getCopilotByAnyEmail(request.email) : null;
-  const codeRow = request.code ? await getCopilotByPromoCode(request.code) : null;
+  const emailRow = request.email
+    ? await getCopilotByAnyEmail(request.email)
+    : null;
+  const codeRow = request.code
+    ? await getCopilotByPromoCode(request.code)
+    : null;
   return {
     test: false,
     ...verifyCopilotMatch({
@@ -128,7 +172,31 @@ async function copilotFor(request) {
   };
 }
 
+function slotKey(slots) {
+  return (slots || [])
+    .map((slot) => `${slot.date || ""} ${slot.hhmmss || ""}`.trim())
+    .filter(Boolean)
+    .sort()
+    .join("|");
+}
+
 async function offerAvailability(request, { dryRun }) {
+  if (request.availabilitySent && !request.confirmedSession && !request.copilotEmailed) {
+    const logged = parseLoggedSlots(request.matchLog);
+    if (logged && slotKey(logged) !== slotKey(request.slots)) {
+      console.log(`   ${label(request)}: requested time changed — looking again`);
+      request.availabilitySent = false;
+      request.windowNoted = false;
+      if (!dryRun) {
+        await updateHybridRequest(request.id, {
+          availabilitySent: false,
+          windowNoted: false,
+          copilotConfirm: false,
+        });
+      }
+      request.copilotConfirm = false;
+    }
+  }
   if (request.availabilitySent) return;
   const who = label(request);
   const outside = outsideSlots(request);
@@ -139,7 +207,7 @@ async function offerAvailability(request, { dryRun }) {
     await setHold(
       request,
       request.email ? "Missing a co-pilot code." : "Missing an email.",
-      dryRun
+      dryRun,
     );
     return;
   }
@@ -160,72 +228,151 @@ async function offerAvailability(request, { dryRun }) {
   }
 
   let suggestions = [];
-  if (open.length && request.locations.length) {
-    const found = await findSuggestions({ ...request, slots: open });
-    suggestions = found.suggestions;
-    if (!suggestions.length && found.overlaps.length && request.guestCount != null) {
-      console.log(
-        `   ${who}: ${found.overlaps.length} overlapping session(s), none have room for ${request.guestCount}`
-      );
-      for (const match of found.overlaps) console.log(`     ${formatSuggestion(match)}`);
+  let guidedOnly = false;
+  let schedulePending = false;
+  const missed = [];
+  if (request.locations.length) {
+    for (const slot of open) {
+      const day = await loadDay(request, slot);
+      if (!day.anySessions) {
+        schedulePending = true;
+        continue;
+      }
+      if (day.suggestions.length) {
+        suggestions = day.suggestions;
+        break;
+      }
+      if (day.guidedOnly) {
+        guidedOnly = true;
+        console.log(
+          `   ${who}: ${formatRequestedTime(slot)} isn't a Free Flow — hybrids are Free Flow only`,
+        );
+      } else if (request.guestCount != null) {
+        console.log(
+          `   ${who}: ${formatRequestedTime(slot)} can't hold ${request.guestCount} guests`,
+        );
+      }
+      missed.push(slot);
     }
   }
 
-  const tellWindow = outside.length > 0 && !request.windowNoted;
   const tellSuggestions = suggestions.length > 0;
-  if (!tellWindow && !tellSuggestions) {
-    if (open.length) {
-      console.log(`   ${who}: no overlapping hybrid session yet — left for the next run`);
+  const tellUnavailable =
+    !tellSuggestions &&
+    !schedulePending &&
+    (guidedOnly || missed.length > 0 || (outside.length > 0 && !request.windowNoted));
+  if (!tellSuggestions && !tellUnavailable) {
+    if (schedulePending) {
+      console.log(`   ${who}: no sessions on that day yet — left for the next run`);
     }
     return;
   }
 
   const displayName = copilotDisplayName(verdict.copilot, request.code);
-  const notedOutside = tellWindow ? outside : [];
-  for (const slot of notedOutside) {
+  for (const slot of tellSuggestions ? [] : outside) {
     console.log(`   ${who}: outside the window — ${formatRequestedTime(slot)}`);
   }
   for (const match of suggestions) {
     console.log(`   ${who}: suggest ${formatSuggestion(match)}`);
   }
 
+  const discordText = hybridDiscordText({
+    title: tellSuggestions
+      ? "Hybrid request — session offered"
+      : "Hybrid request — no room at that time",
+    request,
+    displayName,
+    sessions: suggestions,
+    extra: tellSuggestions
+      ? "Waiting on Copilot Confirm."
+      : "Emailed them to pick another time.",
+    link: request.url,
+  });
   if (dryRun) {
     const where = tellSuggestions ? ` and link ${request.url}` : "";
     console.log(`   (DRY_RUN) email ${request.email}${where}`);
+    await notifyHybridDiscord(discordText, { dryRun: true });
     return;
   }
 
-  if (tellSuggestions) await ensureSessionChoices(request.id, suggestions);
+  if (tellSuggestions) {
+    await syncBookingNote(request.id, suggestions, request.notes);
+    request.notes = copilotNotes(request.notes);
+  }
+  const unavailableSlots = tellSuggestions
+    ? []
+    : [...missed, ...outside].filter((slot, index, all) => {
+        const key = `${slot.date} ${slot.hhmmss}`;
+        return all.findIndex((item) => `${item.date} ${item.hhmmss}` === key) === index;
+      });
   await sendHybridRequestEmail({
     email: request.email,
     displayName,
     sessions: suggestions,
     guestCount: request.guestCount,
-    outsideSlots: notedOutside,
+    unavailableSlots,
     requestUrl: request.url,
+    formUrl: config.hybrid.requestFormUrl,
   });
-  const finished = tellSuggestions || open.length === 0;
+  const finished = tellSuggestions || tellUnavailable;
+  const matchLog = serializeMatchLog(suggestions, request.slots);
   await updateHybridRequest(request.id, {
     windowNoted: true,
+    matchLog,
     ...(finished ? { availabilitySent: true } : {}),
-    ...(tellSuggestions ? { matchLog: serializeMatchLog(suggestions), hold: "" } : {}),
+    ...(tellSuggestions ? { hold: "", copilotConfirm: false } : {}),
   });
   request.windowNoted = true;
+  request.matchLog = matchLog;
   if (finished) request.availabilitySent = true;
-  if (tellSuggestions) request.matchLog = serializeMatchLog(suggestions);
+  if (tellSuggestions) request.copilotConfirm = false;
   console.log(`   emailed ${request.email}`);
+  await notifyHybridDiscord(discordText);
 }
 
-async function confirmChoice(request, sessionId, { dryRun }) {
-  const who = label(request);
-  const done = new Set(confirmedSessionIds(request.confirmedSession));
-  if (done.has(sessionId)) return;
+function defaultCreditUrl(matches) {
+  const cities = [
+    ...new Set((matches || []).map((match) => match.city).filter(Boolean)),
+  ];
+  if (cities.length !== 1) return "";
+  if (cities[0] === "Toronto") return String(config.hybrid.creditUrlToronto || "").trim();
+  if (cities[0] === "New York") return String(config.hybrid.creditUrlNewYork || "").trim();
+  return "";
+}
 
-  const { session, match } = await loadSessionMatch(sessionId);
-  const offered = parseMatchLog(request.matchLog).some((item) => item.id === sessionId);
-  if (offered && !fitsGuestCount(match, request.guestCount)) {
+async function creditLinkFor(request, matches) {
+  const pasted = await findCreditLink(request.id, request.eventCreditLink);
+  return pasted || defaultCreditUrl(matches);
+}
+
+async function confirmPlan(request, { dryRun }) {
+  const who = label(request);
+  if (request.copilotEmailed) return;
+  const plan = parseMatchLog(request.matchLog);
+  if (!request.copilotConfirm) {
+    if (plan.length && request.availabilitySent) {
+      console.log(`   ${who}: waiting on Copilot Confirm`);
+    }
+    return;
+  }
+  if (!plan.length) return;
+
+  const loaded = [];
+  for (const item of plan) {
+    const row = await loadSessionMatch(item.id);
+    if (!isHybridFreeFlow(row.match.className)) {
+      console.log(
+        `   ${who}: ${row.match.className || item.id} isn't a Free Flow — hybrids are Free Flow only`,
+      );
+      return;
+    }
+    loaded.push(row);
+  }
+  const matches = loaded.map((row) => row.match);
+  const seats = matches.reduce((sum, match) => sum + (Number(match.available) || 0), 0);
+  if (request.guestCount != null && seats < request.guestCount) {
     console.log(
-      `   ${who}: ${formatSuggestion(match)} does not have room for ${request.guestCount}`
+      `   ${who}: the offered sessions now have ${seats} spots, short of ${request.guestCount}`,
     );
     return;
   }
@@ -235,18 +382,43 @@ async function confirmChoice(request, sessionId, { dryRun }) {
     await setHold(request, verdict.hold, dryRun);
     return;
   }
-  const creditUrl = await findCreditLink(request.id, request.eventCreditLink);
-  const scheduleUrl = scheduleSessionUrl(match);
+  const creditUrl = await creditLinkFor(request, matches);
   const displayName = copilotDisplayName(verdict.copilot, request.code);
+  const missingLink = matches.find((match) => !scheduleSessionUrl(match));
+
+  const hadCard = Boolean(request.calendarCard);
+  const confirmText = (emailed) =>
+    hybridDiscordText({
+      title: emailed ? "Hybrid confirmed" : "Hybrid held — needs a credit link",
+      request,
+      displayName,
+      sessions: matches,
+      extra: emailed
+        ? "Tagged Reduced. Confirmation email sent."
+        : "Tagged Reduced. Confirmation email waits on Event Credit Link.",
+      link: request.calendarCard || request.url,
+    });
 
   if (dryRun) {
     console.log(
-      `   (DRY_RUN) card for ${formatSuggestion(match)}, tag Reduced, ${
+      `   (DRY_RUN) card for ${matches.length} session(s), tag Reduced, ${
         creditUrl ? `email ${request.email}` : "wait on Event Credit Link"
-      }`
+      }`,
     );
-    console.log(`   schedule ${scheduleUrl}`);
+    for (const match of matches) console.log(`   schedule ${scheduleSessionUrl(match)}`);
+    await notifyHybridDiscord(confirmText(Boolean(creditUrl)), { dryRun: true });
     return;
+  }
+
+  const nextTitle = confirmedRequestTitle(request.code, matches[0]);
+  if (request.title && !String(request.title).includes("|") && nextTitle !== request.title) {
+    if (dryRun) {
+      console.log(`   (DRY_RUN) title ${nextTitle}`);
+    } else {
+      await updateHybridRequest(request.id, { title: nextTitle });
+      request.title = nextTitle;
+      console.log(`   title ${nextTitle}`);
+    }
   }
 
   if (!request.calendarCard) {
@@ -257,38 +429,44 @@ async function confirmChoice(request, sessionId, { dryRun }) {
       requestUrl: request.url,
       guestCount: request.guestCount,
       community: request.community,
-      notes: request.notes,
-      sessions: [match],
+      notes: copilotNotes(request.notes),
+      sessions: matches,
     });
     await updateHybridRequest(request.id, { calendarCard: card.url });
     request.calendarCard = card.url;
     console.log(`   hold card ${card.url}`);
   }
 
-  const tagged = await tagClassSession(session);
-  console.log(
-    `   MT session ${tagged.sessionId}${tagged.alreadyTagged ? " already tagged" : " tagged Reduced"}`
-  );
+  for (const row of loaded) {
+    const tagged = await tagClassSession(row.session);
+    console.log(
+      `   MT session ${tagged.sessionId}${tagged.alreadyTagged ? " already tagged" : " tagged Reduced"}`,
+    );
+  }
   await updateHybridRequest(request.id, { mtTagged: true });
   request.mtTagged = true;
 
   if (!creditUrl) {
-    console.log(
-      `   ${who}: session ${sessionId} is held. Confirmation email waits on Event Credit Link.`
-    );
+    console.log(`   ${who}: sessions are held. Confirmation email waits on a credit link.`);
+    if (!hadCard) await notifyHybridDiscord(confirmText(false));
     return;
   }
+  if (!request.eventCreditLink) {
+    await updateHybridRequest(request.id, { eventCreditLink: creditUrl });
+    request.eventCreditLink = creditUrl;
+  }
   if (!request.email) throw new Error(`${who} is confirmed but has no email`);
-  if (!scheduleUrl) throw new Error(`${who} is confirmed but session ${sessionId} has no schedule link`);
+  if (missingLink) {
+    throw new Error(`${who} is confirmed but session ${missingLink.id} has no schedule link`);
+  }
 
   await sendHybridBookedEmail({
     email: request.email,
     displayName,
-    session: match,
+    sessions: matches,
     creditUrl,
-    scheduleUrl,
   });
-  const confirmed = [...done, sessionId].join(", ");
+  const confirmed = matches.map((match) => match.id).join(", ");
   await updateHybridRequest(request.id, {
     confirmedSession: confirmed,
     copilotEmailed: true,
@@ -297,25 +475,12 @@ async function confirmChoice(request, sessionId, { dryRun }) {
   request.confirmedSession = confirmed;
   request.copilotEmailed = true;
   console.log(`   confirmation emailed to ${request.email}`);
-}
-
-async function confirmChecked(request, { dryRun }) {
-  const choices = await listSessionChoices(request.id);
-  const checked = choices.filter((choice) => choice.checked);
-  if (!checked.length) {
-    if (choices.length && !confirmedSessionIds(request.confirmedSession).length) {
-      console.log(`   ${label(request)}: waiting on a checked session`);
-    }
-    return;
-  }
-  for (const choice of checked) {
-    await confirmChoice(request, choice.id, { dryRun });
-  }
+  await notifyHybridDiscord(confirmText(true));
 }
 
 async function processRequest(request, { dryRun }) {
   await offerAvailability(request, { dryRun });
-  await confirmChecked(request, { dryRun });
+  await confirmPlan(request, { dryRun });
 }
 
 export async function processHybridRequests() {
@@ -327,7 +492,7 @@ export async function processHybridRequests() {
 
   const requests = await listHybridRequests();
   console.log(
-    `\n🟤 Hybrid requests: ${requests.length} row(s)${dryRun ? " (dry run)" : ""}`
+    `\n🟤 Hybrid requests: ${requests.length} row(s)${dryRun ? " (dry run)" : ""}`,
   );
 
   let failed = 0;

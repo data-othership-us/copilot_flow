@@ -24,6 +24,14 @@
 --       mt_orders for Co-Pilot 2-for intro products. Last-touch within 7 days.
 --       Added to promo redemptions for cycle_points, and to all-time
 --       redemptions (an order already counted on the code is not counted again).
+--   - copilots.copilot_hybrid_sessions (confirmed Hybrid Requests)
+--       Checked-in Co-Pilot / Community event credits on that session.
+--       Pretax is the order line split across the credits that order
+--       bought, in the copilot's region currency (NYC = USD, TO = CAD).
+--       sheet_hybrid_sales is the roster total plus every checked-in
+--       credit. hybrid_current_cycle is the pretax of check-ins inside
+--       the latest Co-Pilot term. That cycle amount adds its own points
+--       (floor of dollars / 100) on top of promo-code and 2-for-1 points.
 --   - copilots.modash_content + modash_creators (Slack-bot CSV ingest)
 --       Join: contact_email ↔ creator email_raw, else split_ig_handles
 --       (ops sheets may list several IG accounts in one cell) plus tiktok_handle.
@@ -42,12 +50,12 @@
 -- scheduled_end_at, else end_date, else cancelled_at) as an Eastern date.
 -- days_to_expiry is DATE_DIFF(membership_end, today Eastern).
 -- copilot_months_active is the total length of Co-Pilot-named instances only.
--- cycle_points: floor(redemption_subtotal_current_membership / 100).
---   That total is pretax promo-code sales plus Co-Pilot intro-offer (2-for-1)
---   link sales in the latest Co-Pilot term (NYC = USD, TO = CAD).
--- last_month_points: same formula for the previous complete Eastern
---   calendar month (a September email ranks August). Still clipped to the
---   live Co-Pilot term.
+-- cycle_points: floor(promo-code + intro-offer pretax / 100)
+--   plus floor(hybrid_current_cycle / 100). Hybrid dollars stay out of
+--   the promo and 2-for-1 totals. NYC uses USD, Toronto uses CAD.
+-- last_month_points: promo-code plus intro-offer pretax for the previous
+--   complete Eastern calendar month (a September email ranks August),
+--   clipped to the live Co-Pilot term. Hybrid credits are not included.
 -- social_requirement_met_last_cycle_month: the most recently completed
 --   membership interval (NULL if none has finished). 4 stories or 1
 --   grid post (IG reel/carousel/post, or TikTok video) in that interval.
@@ -852,6 +860,113 @@ modash_followers AS (
     ) = h.ig_handle
   WHERE c.followers IS NOT NULL
   GROUP BY h.contact_email
+),
+-- Purchased Co-Pilot / Community event credits, pretax share of the order.
+hybrid_purchase_lines AS (
+  SELECT
+    p.credit_transaction_id,
+    l.order_id,
+    l.title,
+    l.line_subtotal
+  FROM `data-pipeline-492715.core.mt_credit_transactions` AS p
+  JOIN `data-pipeline-492715.core.mt_order_lines` AS l
+    ON l.user_id = p.user_id
+   AND l.title = p.credit_name
+   AND l.currency = p.currency
+  JOIN `data-pipeline-492715.core.mt_orders` AS o
+    ON o.order_id = l.order_id
+   AND o.purchased_at = p.transaction_at
+   AND o.status = 'Completed'
+   AND IFNULL(o.contains_refund, FALSE) = FALSE
+  WHERE p.origination_type = 'purchase'
+    AND REGEXP_CONTAINS(
+      LOWER(p.credit_name),
+      r'co-?pilot event credit|community event credit'
+    )
+),
+hybrid_purchase_share AS (
+  SELECT
+    credit_transaction_id,
+    ANY_VALUE(pretax_each) AS pretax_each
+  FROM (
+    SELECT
+      credit_transaction_id,
+      SAFE_DIVIDE(
+        line_subtotal,
+        COUNT(DISTINCT credit_transaction_id) OVER (PARTITION BY order_id, title)
+      ) AS pretax_each
+    FROM hybrid_purchase_lines
+  )
+  GROUP BY credit_transaction_id
+),
+hybrid_credit_uses AS (
+  SELECT
+    LOWER(TRIM(h.contact_email)) AS contact_email,
+    usage.credit_transaction_id AS usage_id,
+    parent.currency,
+    share.pretax_each,
+    COALESCE(r.check_in_date, r.session_start_date) AS use_date
+  FROM `YOUR_PROJECT.copilots.copilot_hybrid_sessions` AS h
+  JOIN `data-pipeline-492715.core.mt_reservations` AS r
+    ON r.session_id = h.session_id
+  JOIN `data-pipeline-492715.core.mt_reservation_products` AS rp
+    ON rp.reservation_id = r.reservation_id
+  JOIN `data-pipeline-492715.core.mt_credit_transactions` AS usage
+    ON usage.credit_transaction_id = rp.credit_transaction_id
+   AND usage.transaction_amount < 0
+  JOIN `data-pipeline-492715.core.mt_credit_transactions` AS parent
+    ON parent.credit_transaction_id = usage.parent_credit_transaction_id
+   AND parent.origination_type = 'purchase'
+  JOIN hybrid_purchase_share AS share
+    ON share.credit_transaction_id = parent.credit_transaction_id
+  WHERE IFNULL(r.session_is_cancelled, FALSE) = FALSE
+    AND LOWER(IFNULL(r.status, '')) = 'check in'
+    AND REGEXP_CONTAINS(
+      LOWER(parent.credit_name),
+      r'co-?pilot event credit|community event credit'
+    )
+),
+hybrid_credit_one AS (
+  SELECT
+    contact_email,
+    usage_id,
+    ANY_VALUE(currency) AS currency,
+    ANY_VALUE(pretax_each) AS pretax_each,
+    ANY_VALUE(use_date) AS use_date
+  FROM hybrid_credit_uses
+  GROUP BY contact_email, usage_id
+),
+hybrid_credit_by_copilot AS (
+  SELECT
+    u.contact_email,
+    SUM(IF(u.currency = 'USD', u.pretax_each, 0)) AS hybrid_credit_usd,
+    SUM(IF(u.currency = 'CAD', u.pretax_each, 0)) AS hybrid_credit_cad,
+    SUM(
+      IF(
+        u.currency = 'USD'
+          AND e.mem_start_date IS NOT NULL
+          AND REGEXP_CONTAINS(LOWER(IFNULL(e.mem_name, '')), r'co[\s-]?pilot')
+          AND u.use_date >= e.mem_start_date
+          AND u.use_date <= COALESCE(e.mem_end_date, CURRENT_DATE('America/New_York')),
+        u.pretax_each,
+        0
+      )
+    ) AS hybrid_credit_usd_current_membership,
+    SUM(
+      IF(
+        u.currency = 'CAD'
+          AND e.mem_start_date IS NOT NULL
+          AND REGEXP_CONTAINS(LOWER(IFNULL(e.mem_name, '')), r'co[\s-]?pilot')
+          AND u.use_date >= e.mem_start_date
+          AND u.use_date <= COALESCE(e.mem_end_date, CURRENT_DATE('America/New_York')),
+        u.pretax_each,
+        0
+      )
+    ) AS hybrid_credit_cad_current_membership
+  FROM hybrid_credit_one AS u
+  LEFT JOIN enriched AS e
+    ON LOWER(TRIM(e.contact_email)) = u.contact_email
+  GROUP BY u.contact_email
 )
 SELECT
   -- Identity / program
@@ -990,6 +1105,22 @@ SELECT
       ),
       0
     ) / 100
+  ) AS INT64)
+  + CAST(FLOOR(
+    GREATEST(
+      COALESCE(
+        IF(
+          REGEXP_CONTAINS(
+            UPPER(TRIM(IFNULL(e.region, ''))),
+            r'^(NYC|NY)$|NEW YORK'
+          ),
+          COALESCE(hybrid.hybrid_credit_usd_current_membership, 0),
+          COALESCE(hybrid.hybrid_credit_cad_current_membership, 0)
+        ),
+        0
+      ),
+      0
+    ) / 100
   ) AS INT64) AS cycle_points,
   CAST(FLOOR(
     GREATEST(
@@ -1017,7 +1148,28 @@ SELECT
   e.combined_sales AS sheet_combined_sales,
   e.bb_sales AS sheet_bb_sales,
   e.mt_sales AS sheet_mt_sales,
-  e.hybrid_sales AS sheet_hybrid_sales,
+  IF(
+    e.hybrid_sales IS NULL
+      AND COALESCE(hybrid.hybrid_credit_usd, 0) = 0
+      AND COALESCE(hybrid.hybrid_credit_cad, 0) = 0,
+    NULL,
+    COALESCE(e.hybrid_sales, 0) + IF(
+      REGEXP_CONTAINS(
+        UPPER(TRIM(IFNULL(e.region, ''))),
+        r'^(NYC|NY)$|NEW YORK'
+      ),
+      COALESCE(hybrid.hybrid_credit_usd, 0),
+      COALESCE(hybrid.hybrid_credit_cad, 0)
+    )
+  ) AS sheet_hybrid_sales,
+  IF(
+    REGEXP_CONTAINS(
+      UPPER(TRIM(IFNULL(e.region, ''))),
+      r'^(NYC|NY)$|NEW YORK'
+    ),
+    COALESCE(hybrid.hybrid_credit_usd_current_membership, 0),
+    COALESCE(hybrid.hybrid_credit_cad_current_membership, 0)
+  ) AS hybrid_current_cycle,
   e.new_hybrid_sales,
   e.bb_facing_amount AS sheet_bb_facing,
   e.mt_facing_amount AS sheet_mt_facing,
@@ -1049,6 +1201,8 @@ LEFT JOIN intro_sales_last_month AS intro_lm
   ON intro_lm.contact_email = e.contact_email
 LEFT JOIN intro_sales_after_membership AS intro_after
   ON intro_after.contact_email = e.contact_email
+LEFT JOIN hybrid_credit_by_copilot AS hybrid
+  ON hybrid.contact_email = LOWER(TRIM(e.contact_email))
 LEFT JOIN modash_stats AS md
   ON md.contact_email = e.contact_email
 LEFT JOIN modash_current_stats AS mdc

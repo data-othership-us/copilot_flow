@@ -3,6 +3,7 @@ import {
   getBigQueryClient,
   getBqConfig,
 } from "../bqConfig.js";
+import { syncHybridSessions } from "./hybridSessions.js";
 
 function queryOptions(params = {}, types = undefined) {
   const { location } = getBqConfig();
@@ -872,6 +873,7 @@ export async function applySheetUnionViews() {
     "modash_content.sql",
     "raw_copilots_union.sql",
     "raw_copilots_dedup.sql",
+    "copilot_hybrid_sessions.sql",
     "copilot_performance.sql",
     "copilot_evaluation_queue.sql",
     "copilot_add_to_modash.sql",
@@ -889,5 +891,15 @@ export async function applySheetUnionViews() {
     sql = sql.slice(createAt);
     console.log(`   Applying ${file}…`);
     await bigquery.query({ query: sql, location });
+    if (file === "copilot_hybrid_sessions.sql") {
+      try {
+        const n = await syncHybridSessions();
+        console.log(`   hybrid sessions: ${n} confirmed session(s)`);
+      } catch (error) {
+        console.warn(
+          `   ⚠️  Could not refresh hybrid sessions: ${error.message}`,
+        );
+      }
+    }
   }
 }
